@@ -1,0 +1,21 @@
+func Counter(n){ 
+    func wrapper(){
+        func add(){
+            assign n = n + 1;
+        }
+        func sub(){
+            assign n = n - 1;
+        }
+        func count(){
+            return n;
+        }
+        return Dict("add">add,"sub">sub,"count">count);
+    }
+    return wrapper;
+}
+var counter = Counter(5)();
+counter.sub();
+counter.sub();
+counter["sub"]();
+counter.add();
+print(counter["count"]());
