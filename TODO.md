@@ -1,0 +1,7 @@
+- parser 对 EOF 的处理
+- 移除奇怪的assign（强行LL(1)
+- && || 短路运算
+- 重构vm
+- 移除不需要的内置类型 done
+- 重构interned string
+- 消除warning

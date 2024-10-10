@@ -7,9 +7,6 @@ pub enum Token {
     Symbol(String),
     True,
     False,
-    Matrix,
-    Vec2,
-    Vec3,
     Dict,
     Stick,
     Nil,
@@ -44,6 +41,7 @@ pub enum Token {
     LArrow,
     RArrow,
     Semicolon,
+    Colon,
     Equal,
     EEqual,
 

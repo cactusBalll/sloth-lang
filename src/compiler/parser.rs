@@ -23,8 +23,6 @@ fn get_precedence(token: &Token) -> PrattPrecedence {
         | Token::True
         | Token::False
         | Token::Nil
-        | Token::Vec2
-        | Token::Vec3
         | Token::Dict
         | Token::Stick
         | Token::Array => PrattPrecedence::Primary,
@@ -99,7 +97,12 @@ impl ParserCtx {
     }
     fn parse(&mut self) -> Result<(), String> {
         loop {
-            match self.peek()? {
+            let tok = if let Some(tok) = self.peek() {
+                tok
+            } else {
+                return Ok(());
+            };
+            match tok {
                 Token::Var => {
                     self.parse_decl()?;
                 }
@@ -112,9 +115,6 @@ impl ParserCtx {
                 Token::While => {
                     self.parse_while()?;
                 }
-                Token::Assign => {
-                    self.parse_assign()?;
-                }
                 Token::Function => {
                     self.parse_func_decl()?;
                 }
@@ -125,9 +125,6 @@ impl ParserCtx {
                     self.parse_except()?;
                 }
                 Token::Symbol(_)
-                | Token::Matrix
-                | Token::Vec2
-                | Token::Vec3
                 | Token::Array
                 | Token::Dict
                 | Token::Number(_)
@@ -150,7 +147,12 @@ impl ParserCtx {
     }
     fn parse_return(&mut self) -> Result<(), String> {
         self.consume(Token::Return)?;
-        if Token::Semicolon == self.peek()? {
+        let tok = if let Some(tok) = self.peek() {
+            tok
+        } else {
+            return Ok(());
+        };
+        if Token::Semicolon == tok {
             self.emit(Instr::Return);
             self.advance();
             Ok(())
@@ -172,87 +174,17 @@ impl ParserCtx {
         self.consume(Token::Semicolon)?;
         Ok(())
     }
-    fn parse_assign(&mut self) -> Result<(), String> {
-        self.consume(Token::Assign)?;
-        if let Token::Symbol(symbol) = self.peek()? {
-            self.advance();
-            if Token::Equal == self.peek()? {
-                let line = self.get_line();
-                self.consume(Token::Equal)?;
-                self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
-                self.emit_set_symbol(&symbol, line)?;
-                self.emit(Instr::Pop);
-                self.consume(Token::Semicolon)?;
-            } else {
-                self.emit_get_symbol(&symbol, self.get_line())?;
-
-                loop {
-                    let tk = self.peek()?;
-                    match tk {
-                        Token::LBracket => {
-                            let line = self.get_line();
-                            self.advance();
-                            self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
-                            if Token::Equal == self.peek2()? {
-                                self.consume(Token::RBracket)?;
-                                break;
-                            } else {
-                                self.emit_with_line(Instr::GetCollection, line);
-                                self.consume(Token::RBracket)?;
-                            }
-                        }
-                        Token::Dot => {
-                            self.advance();
-                            if let Token::Symbol(s) = self.peek()? {
-                                self.load_value(Value::String(s));
-                                self.advance();
-                                if Token::Equal == self.peek()? {
-                                    break;
-                                } else {
-                                    self.emit(Instr::GetCollection);
-                                }
-                            } else {
-                                return Err(self.parser_err_str(
-                                    "illegal expr, only \"<Symbol>.[<Symbol>]*\" is allowed",
-                                ));
-                            }
-                        }
-                        Token::LParen => {
-                            let line = self.get_line();
-                            self.advance();
-                            let arg_num = self.parse_argument()?;
-                            self.consume(Token::RParen)?;
-                            self.emit_with_line(Instr::Call(arg_num), line);
-                        }
-                        Token::Equal => {
-                            break;
-                        }
-                        _ => {
-                            return Err(self.parser_err_str("illegal lval_expr"));
-                        }
-                    }
-                }
-                let line = self.get_line();
-                self.consume(Token::Equal)?;
-                self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
-                self.consume(Token::Semicolon)?;
-                self.emit_with_line(Instr::SetCollection, line);
-            }
-        } else {
-            return Err(self.parser_err_str("illegal assign expr."));
-        }
-        Ok(())
-    }
     #[inline]
     fn parse_argument(&mut self) -> Result<usize, String> {
         let mut argument_num = 0;
-        if Token::RParen == self.peek()? {
+        let tok = self.peek_not_eof()?;
+        if Token::RParen == tok {
             return Ok(0);
         }
         loop {
             self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
             argument_num += 1;
-            let tk = self.peek()?;
+            let tk = self.peek_not_eof()?;
             if Token::Comma == tk {
                 self.advance();
             } else if Token::RParen == tk {
@@ -304,7 +236,7 @@ impl ParserCtx {
     fn parse_func_decl(&mut self) -> Result<(), String> {
         self.consume(Token::Function)?;
         let symbol;
-        if let Token::Symbol(s) = self.peek()? {
+        if let Token::Symbol(s) = self.peek_not_eof()? {
             symbol = s;
         } else {
             return Err(self.parser_err_str("invalid function declaration."));
@@ -314,14 +246,14 @@ impl ParserCtx {
         self.open_env();
         self.consume(Token::LParen)?;
         let mut para_num = 0;
-        while let Token::Symbol(s) = self.peek()? {
+        while let Token::Symbol(s) = self.peek_not_eof()? {
             self.advance();
             self.add_local(s)?;
             para_num += 1;
             match self.consume(Token::Comma) {
                 Ok(()) => {}
                 Err(_) => {
-                    if Token::RParen == self.peek()? {
+                    if Token::RParen == self.peek_not_eof()? {
                         //self.advance();
                         break;
                     } else {
@@ -344,21 +276,24 @@ impl ParserCtx {
     fn parse_decl(&mut self) -> Result<(), String> {
         self.consume(Token::Var)?;
         let symbol;
-        if let Token::Symbol(s) = self.peek()? {
+        if let Token::Symbol(s) = self.peek_not_eof()? {
             symbol = s;
         } else {
             return Err(self.parser_err_str("invalid declaration statement"));
         }
         self.advance();
-        if Token::Equal == self.peek()? {
-            self.advance(); //declaration with assignment
-            self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
-            self.add_local(symbol)?;
-            self.emit(Instr::SetLocal(self.chunk[self.depth].num_locals - 1));
-            self.emit(Instr::Pop);
-        } else {
-            self.add_local(symbol)?;
+        if let Some(tok) = self.peek() {
+            //declaration with assignment
+            if Token::Equal == tok {
+                self.advance();
+                self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+                self.add_local(symbol)?;
+                self.emit(Instr::SetLocal(self.chunk[self.depth].num_locals - 1));
+                self.emit(Instr::Pop);
+                return Ok(());
+            }
         }
+        self.add_local(symbol)?;
         self.consume(Token::Semicolon)?;
         Ok(())
     }
@@ -397,22 +332,27 @@ impl ParserCtx {
         self.consume(Token::LParen)?;
         self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
         let patch_point = self.chunk[self.depth].bytecodes.len();
+        // emit an empty slot, jump to FALSE branch but FALSE branch is now not parsed.
         self.emit(Instr::JumpIfNot(0));
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
         self.parse()?;
         let patch_point2 = self.chunk[self.depth].bytecodes.len();
+        // emit an empty slot, jump to end of if statement, but we still don't know if there
+        // is an else clause, Jump(0) is just nop.
         self.emit(Instr::Jump(0));
         self.consume(Token::RBrace)?;
         self.chunk[self.depth].bytecodes[patch_point] =
             Instr::JumpIfNot((self.chunk[self.depth].bytecodes.len() - patch_point) as i32);
-        if Token::Else == self.peek()? {
-            self.advance();
-            self.consume(Token::LBrace)?;
-            self.parse()?;
-            self.consume(Token::RBrace)?;
-            self.chunk[self.depth].bytecodes[patch_point2] =
-                Instr::Jump((self.chunk[self.depth].bytecodes.len() - patch_point2) as i32);
+        if let Some(tok) = self.peek() {
+            if Token::Else == tok {
+                self.advance();
+                self.consume(Token::LBrace)?;
+                self.parse()?;
+                self.consume(Token::RBrace)?;
+                self.chunk[self.depth].bytecodes[patch_point2] =
+                    Instr::Jump((self.chunk[self.depth].bytecodes.len() - patch_point2) as i32);
+            }
         }
         Ok(())
     }
@@ -449,7 +389,8 @@ impl ParserCtx {
         prec: PrattPrecedence,
         decl_symbol: Option<&str>,
     ) -> Result<(), String> {
-        match self.peek()? {
+        // Pratt Parser
+        match self.peek_not_eof()? {
             Token::Symbol(s) => {
                 match self.resolve_local(&s) {
                     VarLoc::Local(x) => self.emit(Instr::GetLocal(x)),
@@ -481,15 +422,7 @@ impl ParserCtx {
             Token::Nil => {
                 self.emit(Instr::PushNil);
             }
-            Token::Matrix => {
-                self.parse_matrix()?;
-            }
-            Token::Vec2 => {
-                self.parse_vec2()?;
-            }
-            Token::Vec3 => {
-                self.parse_vec3()?;
-            }
+
             Token::Array => {
                 self.parse_array()?;
             }
@@ -519,7 +452,7 @@ impl ParserCtx {
                 //unimplemented!();
             }
         }
-        while let Ok(tk) = self.peek() {
+        while let Some(tk) = self.peek() {
             let line = self.get_line();
             if tk == Token::Semicolon {
                 break;
@@ -530,12 +463,8 @@ impl ParserCtx {
                 self.advance();
                 let arg_num = self.parse_argument()?;
                 self.consume(Token::RParen)?;
-                if Token::Question == self.peek()? {
-                    self.emit_with_line(Instr::TryCall(arg_num), line);
-                    self.advance();
-                } else {
-                    self.emit_with_line(Instr::Call(arg_num), line);
-                }
+                self.emit_with_line(Instr::Call(arg_num), line);
+
                 continue;
             }
             if tk == Token::LBracket {
@@ -549,7 +478,7 @@ impl ParserCtx {
             if tk == Token::Dot {
                 let line = self.get_line();
                 self.advance();
-                if let Token::Symbol(s) = self.peek()? {
+                if let Token::Symbol(s) = self.peek_not_eof()? {
                     self.load_value(Value::String(s));
                     self.advance();
                 } else {
@@ -613,55 +542,6 @@ impl ParserCtx {
         }
         Ok(())
     }
-    fn parse_vec2(&mut self) -> Result<(), String> {
-        self.consume(Token::Vec2)?;
-        self.consume(Token::LParen)?;
-        let (x, y);
-        if let Token::Number(xx) = self.peek()? {
-            x = xx;
-            self.advance();
-        } else {
-            return Err(self.parser_err_str("invalid Vec2 initialization"));
-        }
-        self.consume(Token::Comma)?;
-        if let Token::Number(x) = self.peek()? {
-            y = x;
-            self.advance();
-        } else {
-            return Err(self.parser_err_str("invalid Vec2 initialization"));
-        }
-        self.consume(Token::RParen)?;
-        self.load_value(Value::Vec2(x, y));
-        Ok(())
-    }
-    fn parse_vec3(&mut self) -> Result<(), String> {
-        self.consume(Token::Vec3)?;
-        self.consume(Token::LParen)?;
-        let (x, y, z);
-        if let Token::Number(xx) = self.peek()? {
-            x = xx;
-            self.advance();
-        } else {
-            return Err(self.parser_err_str("invalid Vec3 initialization"));
-        }
-        self.consume(Token::Comma)?;
-        if let Token::Number(x) = self.peek()? {
-            y = x;
-            self.advance();
-        } else {
-            return Err(self.parser_err_str("invalid Vec3 initialization"));
-        }
-        self.consume(Token::Comma)?;
-        if let Token::Number(x) = self.peek()? {
-            z = x;
-            self.advance();
-        } else {
-            return Err(self.parser_err_str("invalid Vec3 initialization"));
-        }
-        self.consume(Token::RParen)?;
-        self.load_value(Value::Vec3(x, y, z));
-        Ok(())
-    }
     fn parse_array(&mut self) -> Result<(), String> {
         self.consume(Token::Array)?;
         let line = self.get_line();
@@ -677,16 +557,20 @@ impl ParserCtx {
         self.consume(Token::LParen)?;
         let mut num_arg = 0;
         loop {
-            let tk = self.peek()?;
+            let tk = self.peek_not_eof()?;
             if let Token::String(s) = tk {
                 self.load_value(Value::String(s));
+            } else if Token::RParen == tk {
+                // empty Dict
+                self.advance();
+                self.emit_with_line(Instr::InitDict(num_arg), line);
             } else {
                 return Err(self.parser_err_str("illegal dict initialization."));
             }
             self.advance();
-            self.consume(Token::RArrow)?;
+            self.consume(Token::Colon)?;
             self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
-            if Token::RParen == self.peek()? {
+            if Token::RParen == self.peek_not_eof()? {
                 num_arg += 1;
                 break;
             } else {
@@ -698,65 +582,52 @@ impl ParserCtx {
         self.emit_with_line(Instr::InitDict(num_arg), line);
         Ok(())
     }
-    fn parse_matrix(&mut self) -> Result<(), String> {
-        self.consume(Token::Matrix)?;
-        self.consume(Token::LParen)?;
-        let (row, col);
-        if let Token::Number(x) = self.peek()? {
-            row = x;
-            self.advance();
-        } else {
-            return Err(self.parser_err_str("invalid Matrix initialization"));
-        }
-        self.consume(Token::Comma)?;
-        if let Token::Number(x) = self.peek()? {
-            col = x;
-            self.advance();
-        } else {
-            return Err(self.parser_err_str("invalid Matrix initialization"));
-        }
-        self.consume(Token::RParen)?;
-        if row <= 0. || col <= 0. {
-            return Err(self.parser_err_str("invalid Matrix initialization with negative size"));
-        }
-        self.emit(Instr::InitMatrix(row as usize, col as usize));
-        Ok(())
-    }
 
-    fn prefix_symbol(&mut self, prec: PrattPrecedence) -> Result<(), String> {
+    fn prefix_symbol(&mut self, _prec: PrattPrecedence) -> Result<(), String> {
         Ok(())
     }
     fn consume(&mut self, token: Token) -> Result<(), String> {
-        if self.peek()? == token {
-            self.advance();
-            Ok(())
-        } else {
-            Err(format!(
-                "unexpected token in ({},{}), expect {:?}, get {:?}",
-                self.token_cood[self.ptr].0,
-                self.token_cood[self.ptr].1,
-                token,
-                self.peek()?
-            ))
+        if let Some(look_tok) = self.peek() {
+            if look_tok == token {
+                return Ok(());
+            } else {
+                return Err(format!(
+                    "unexpected token in ({},{}), expect {:?}, get {:?}",
+                    self.token_cood[self.ptr].0, self.token_cood[self.ptr].1, token, look_tok,
+                ));
+            }
         }
+
+        return Err(format!(
+            "unexpected token in ({},{}), expect {:?}, get EOF",
+            self.token_cood[self.ptr].0, self.token_cood[self.ptr].1, token,
+        ));
     }
     fn parser_err_str(&self, s: &str) -> String {
         format!("{} in {:?}", s, self.token_cood[self.ptr])
     }
     #[inline]
-    fn peek(&self) -> Result<Token, String> {
+    fn peek(&self) -> Option<Token> {
         if self.ptr >= self.len {
-            Err("EOF".to_owned())
+            None
+        } else {
+            Some(self.tokens[self.ptr].clone())
+        }
+    }
+
+    fn peek_not_eof(&self) -> Result<Token, String> {
+        if self.ptr >= self.len {
+            Err(self.parser_err_str("unexpected EOF"))
         } else {
             Ok(self.tokens[self.ptr].clone())
         }
     }
     #[inline]
-    fn peek2(&mut self) -> Result<Token, String> {
+    fn peek2(&mut self) -> Option<Token> {
         if self.ptr + 1 >= self.len {
-            Err("EOF".to_owned())
+            None
         } else {
-            Ok(self.tokens[self.ptr + 1].clone())
+            Some(self.tokens[self.ptr + 1].clone())
         }
     }
     #[inline]

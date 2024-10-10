@@ -31,18 +31,20 @@ pub fn run_string_debug(prog: &str) -> Result<(), String> {
 }
 pub fn run_string(prog: &str) -> Result<(), String> {
     let mut scanner = compiler::scanner::ScannerCtx::new(prog);
-    if let Err(e) = scanner.parse() {
-        if e != "EOF" {
-            return Err(e);
-        }
-    }
+    // if let Err(e) = scanner.parse() {
+    //     if e != "EOF" {
+    //         return Err(e);
+    //     }
+    // }
+    scanner.parse()?;
     let mut parser =
         compiler::parser::ParserCtx::new(scanner.tokens, scanner.cood, native::native_map_parser());
-    if let Err(e) = parser.parse_prog() {
-        if e != "EOF" {
-            return Err(e);
-        }
-    }
+    // if let Err(e) = parser.parse_prog() {
+    //     if e != "EOF" {
+    //         return Err(e);
+    //     }
+    // }
+    parser.parse_prog()?;
     let chunk = parser.chunk.pop().unwrap();
     let mut vm = vm::Vm::new(chunk, native::native_map_vm(), false);
     vm.run()?;
@@ -294,6 +296,8 @@ pub enum Instr {
     Jump(i32),
     Return,
     Except,
+
+    Concat,
 }
 type NativeFunction = fn(&mut Vec<Value>, usize, bool) -> Value;
 #[cfg(test)]

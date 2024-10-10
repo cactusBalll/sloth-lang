@@ -34,9 +34,6 @@ impl ScannerCtx {
             ("not", Token::Not),
             ("true", Token::True),
             ("false", Token::False),
-            ("M", Token::Matrix),
-            ("Vec2", Token::Vec2),
-            ("Vec3", Token::Vec3),
             ("Dict", Token::Dict),
             ("while", Token::While),
             ("var", Token::Var),
@@ -66,15 +63,25 @@ impl ScannerCtx {
             ('<', Token::LArrow),
             ('>', Token::RArrow),
             (';', Token::Semicolon),
+            (':', Token::Colon),
             ('=', Token::Equal),
             ('.', Token::Dot),
             ('?', Token::Question),
         ]);
         loop {
-            match self.peek()? {
-                c if {c == '/' && self.peekn(2)? == '/'} => {
-                    while self.peek()? != '\n'{
-                        self.advance()?;
+            let nxt_c = if let Some(nxt_c) = self.peek() {
+                nxt_c
+            } else {
+                return Ok(());
+            };
+            match nxt_c {
+                c if { c == '/' && self.peekn(2) == Some('/') } => {
+                    while let Some(comment_c) = self.peek() {
+                        if comment_c != '\n' {
+                            self.advance()?;
+                        } else {
+                            break;
+                        }
                     }
                 }
                 c if { c.is_ascii_digit() } => {
@@ -101,7 +108,7 @@ impl ScannerCtx {
                     self.record_pos();
                 }
                 c if { c.is_ascii_punctuation() } => {
-                    if let Ok(ahead) = self.peekn(2) {
+                    if let Some(ahead) = self.peekn(2) {
                         if c == '!' && ahead == '=' {
                             self.tokens.push(Token::NotEqual);
                             self.record_pos();
@@ -152,7 +159,7 @@ impl ScannerCtx {
         }
     }
     fn consume(&mut self, c: char) -> Result<(), String> {
-        if self.peek()? == c {
+        if self.peek() == Some(c) {
             self.advance()?;
             Ok(())
         } else {
@@ -163,24 +170,24 @@ impl ScannerCtx {
         }
     }
     #[inline]
-    fn peek(&self) -> Result<char, String> {
+    fn peek(&self) -> Option<char> {
         if self.ptr < self.len {
-            Ok(self.src[self.ptr])
+            Some(self.src[self.ptr])
         } else {
-            Err("EOF".to_owned())
+            None
         }
     }
     #[inline]
-    fn peekn(&self, n: usize) -> Result<char, String> {
+    fn peekn(&self, n: usize) -> Option<char> {
         if self.ptr + n - 1 < self.len {
-            Ok(self.src[self.ptr + n - 1])
+            Some(self.src[self.ptr + n - 1])
         } else {
-            Err("EOF".to_owned())
+            None
         }
     }
     #[inline]
     fn advance(&mut self) -> Result<(), String> {
-        if self.peek()? == '\n' {
+        if self.peek() == Some('\n') {
             self.col = 1;
             self.row += 1;
         }
@@ -198,7 +205,7 @@ impl ScannerCtx {
         loop {
             let c = self.peek();
             match c {
-                Ok(c) => {
+                Some(c) => {
                     if c.is_alphanumeric() || c == '_' {
                         ret.push(c);
                         self.advance()?;
@@ -206,7 +213,7 @@ impl ScannerCtx {
                         break;
                     }
                 }
-                Err(_) => {
+                None => {
                     break;
                 }
             }
@@ -218,7 +225,7 @@ impl ScannerCtx {
         loop {
             let c = self.peek();
             match c {
-                Ok(c) => {
+                Some(c) => {
                     if c.is_ascii_digit() || c == '.' {
                         ret.push(c);
                         self.advance()?;
@@ -226,7 +233,7 @@ impl ScannerCtx {
                         break;
                     }
                 }
-                Err(_) => {
+                None => {
                     break;
                 }
             }
@@ -243,31 +250,36 @@ impl ScannerCtx {
         loop {
             let c = self.peek();
             match c {
-                Ok(c) => {
+                Some(c) => {
                     if c == '\"' {
                         self.advance()?;
                         break;
                     } else if c == '\\' {
                         // escaped character
-                        let ahead = self.peekn(2)?;
-                        let escaped_ch = match ahead {
-                            '\'' => '\'',
-                            '\"' => '\"',
-                            'n' => '\n',
-                            't' => '\t',
-                            'r' => '\r',
-                            '\\' => '\\',
-                            _ => return Err(self.scanner_err_str("unsupported escaped character")),
-                        };
-                        ret.push(escaped_ch);
-                        self.advance()?;
-                        self.advance()?;
+                        if let Some(ahead) = self.peekn(2) {
+                            let escaped_ch = match ahead {
+                                '\'' => '\'',
+                                '\"' => '\"',
+                                'n' => '\n',
+                                't' => '\t',
+                                'r' => '\r',
+                                '\\' => '\\',
+                                _ => {
+                                    return Err(
+                                        self.scanner_err_str("unsupported escaped character")
+                                    )
+                                }
+                            };
+                            ret.push(escaped_ch);
+                            self.advance()?;
+                            self.advance()?;
+                        }
                     } else {
                         ret.push(c);
                         self.advance()?;
                     }
                 }
-                Err(_) => {
+                None => {
                     return Err(self.scanner_err_str("unexpectd eof before the end of a string"));
                 }
             }
