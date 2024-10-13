@@ -1,32 +1,49 @@
 //use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::hash::Hash;
+use std::ptr;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, Hash)]
 pub struct IString {
-    id: usize,
-    master: *const StringPool,
+    data: *mut StringPoolEntry,
 }
 impl Clone for IString {
     fn clone(&self) -> Self {
-        IString {
-            id: self.id,
-            master: self.master,
+        unsafe {
+            (*self.data).ref_count += 1;
         }
+        IString { data: self.data }
     }
 }
+
 impl PartialEq for IString {
     fn eq(&self, other: &IString) -> bool {
-        self.id == other.id
+        self.data == other.data
     }
 }
 impl Display for IString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let content = unsafe { &(*self.master).data[self.id] };
-        write!(f, "{}", content)
+        let s = unsafe { &(*self.data).data };
+        write!(f, "{}", s)
     }
 }
+
+
+
+impl Drop for IString {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.data).ref_count -= 1;
+        }
+    }
+}
+
+struct StringPoolEntry {
+    data: String,
+    ref_count: usize,
+}
 pub struct StringPool {
-    data: Vec<String>,
+    data: Vec<*mut StringPoolEntry>,
 }
 
 impl StringPool {
@@ -34,18 +51,34 @@ impl StringPool {
         StringPool { data: Vec::new() }
     }
     pub fn creat_istring(&mut self, s: &str) -> IString {
-        for (index, ss) in self.data.iter().enumerate() {
+        for (index, ss_entry) in self.data.iter().enumerate() {
+            let ss = unsafe { &(**ss_entry).data };
             if ss == s {
-                return IString {
-                    id: index,
-                    master: self as *const StringPool,
-                };
+                unsafe {
+                    (**ss_entry).ref_count += 1;
+                }
+                return IString { data: *ss_entry };
             }
         }
-        self.data.push(s.to_owned());
-        IString {
-            id: self.data.len() - 1,
-            master: self as *const StringPool,
+        let entry = Box::new(StringPoolEntry {
+            data: s.to_owned(),
+            ref_count: 1,
+        });
+        let entry = Box::into_raw(entry);
+        self.data.push(entry);
+
+        // clean up
+        for ss_entry in self.data.iter_mut() {
+            unsafe {
+                if (**ss_entry).ref_count <= 0 {
+                    // let Box destruct it
+                    let _to_drop = Box::from_raw(*ss_entry);
+                    *ss_entry = ptr::null_mut() as *mut StringPoolEntry;
+                }
+            }
         }
+        self.data
+            .retain(|e| *e != ptr::null_mut() as *mut StringPoolEntry);
+        IString { data: entry }
     }
 }

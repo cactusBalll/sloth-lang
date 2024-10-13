@@ -2,22 +2,6 @@ use crate::*;
 //type NativeFResult = Result<Value, String>;
 use std::collections::HashSet;
 
-macro_rules! register_nfunc {
-    ($([$f:ident,$s:expr]),*) => {
-        pub fn native_map_parser() -> HashMap<String, usize> {
-            let mut cnt = 0;
-            let mut m = HashMap::new();
-            $(m.insert($s.to_owned(), cnt);
-            cnt += 1;)*
-            m
-        }
-        pub fn native_map_vm() -> Vec<Value> {
-            vec![$(Value::NativeFunction($f as *mut u8),)*]
-        }
-    };
-}
-
-register_nfunc!([sloth_print, "print"],[sloth_typeof,"typeof"]);
 
 pub fn sloth_print(stack: &mut Vec<Value>, arg_num: usize, _protected: bool) -> Value {
     let mut visited_loc: HashSet<*mut u8> = HashSet::new();
@@ -32,23 +16,22 @@ pub fn sloth_typeof(stack: &mut Vec<Value>, _arg_num: usize, _protected: bool) -
     let val = stack.pop().unwrap_or(Value::Nil);
     macro_rules! vstr {
         ($s:expr) => {
-            Value::String($s.to_owned())
+            Value::Nil
         };
     }
     match val {
         Value::Nil => vstr!("Nil"),
         Value::Bool(_) => vstr!("Bool"),
         Value::Number(_) => vstr!("Number"),
-        Value::Vec2(_, _) => vstr!("Vec2"),
-        Value::Vec3(_, _, _) => vstr!("Vec3"),
         Value::String(_) => vstr!("String"),
         Value::Array(_) => vstr!("Array"),
+        Value::Module(_) => vstr!("Module"),
         Value::Dictionary(_) => vstr!("Dict"),
         Value::Error(_) => vstr!("Err"),
-        Value::Matrix(_) => vstr!("Matrix"),
         Value::Closure(_) => vstr!("Closure"),
         Value::NativeFunction(_) => vstr!("NativeFunction"),
-        Value::Chunk(_) => vstr!("Chunk"),
+        Value::OpaqueData(_) => vstr!("OpaqueData"),
+        Value::Fiber(_) => vstr!("Fiber"),
     }
 }
 fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
@@ -62,12 +45,7 @@ fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
         Value::Bool(b) => {
             print!("{b}")
         }
-        Value::Vec2(x, y) => {
-            print!("Vec2({x},{y})")
-        }
-        Value::Vec3(x, y, z) => {
-            print!("Vec3({x},{y},{z})")
-        }
+
         Value::String(s) => {
             print!("\"{s}\"")
         }
@@ -97,9 +75,6 @@ fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
                 print_dict(*d, visited_loc);
                 visited_loc.remove(&(*d as *mut u8));
             }
-        }
-        Value::Matrix(m) => {
-            print_mat(*m, visited_loc);
         }
         Value::Closure(p) => {
             print!("Closure@{p:?}")

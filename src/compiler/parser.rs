@@ -1,6 +1,9 @@
+use interned_string::{IString, StringPool};
+
+use crate::compiler::scanner::ScannerResult;
 use crate::compiler::Token;
 use crate::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub enum PrattPrecedence {
     Lowest,
@@ -41,41 +44,67 @@ fn get_precedence(token: &Token) -> PrattPrecedence {
 enum VarLoc {
     Local(usize),
     UpValue(usize),
-    UpLocal(usize),
     Global(usize),
     NotFound,
 }
-pub struct ParserCtx {
+pub struct ParserCtx<'a> {
     ptr: usize,
     len: usize,
     token_cood: Vec<(usize, usize)>,
     tokens: Vec<Token>,
-    pub chunk: Vec<Chunk>,
+    pub chunk: Vec<Chunk>, // stack of chunks
 
-    symbol_table: Vec<HashMap<String, usize>>,
-    symbol_captured: Vec<Vec<bool>>,
+    func_ctx_stack: Vec<FuncCtx>,
 
+    /// actually foregin(builtin) functions)
     global_symbol: HashMap<String, usize>,
+    /// every toplevel symbols are exported
+    exported_symbols: Vec<IString>,
+    string_pool: &'a mut StringPool,
     depth: usize,
 }
 
-impl ParserCtx {
+pub struct ParserResult {
+    pub chunk: Chunk,
+    pub exported_symbols: Vec<IString>,
+}
+#[derive(Debug, Default)]
+struct FuncCtx {
+    block_ctx_stack: Vec<BlockCtx>,
+    num_locals: usize,
+}
+#[derive(Debug, Default)]
+struct BlockCtx {
+    symbol_table: HashMap<IString, usize>,
+    /// map[local_slot, is_captured]
+    symbol_captured: Vec<bool>,
+}
+
+impl<'a> ParserCtx<'a> {
     pub fn new(
-        tokens: Vec<Token>,
-        token_cood: Vec<(usize, usize)>,
+        scanner_result: ScannerResult,
         global_symbol: HashMap<String, usize>,
-    ) -> ParserCtx {
+        string_pool: &'a mut StringPool,
+    ) -> ParserCtx<'a> {
         ParserCtx {
             ptr: 0,
-            len: tokens.len(),
+            len: scanner_result.tokens.len(),
             chunk: vec![Chunk::default()],
-            tokens,
-            token_cood,
-            symbol_table: vec![HashMap::new()],
-            symbol_captured: vec![vec![]],
+            tokens: scanner_result.tokens,
+            token_cood: scanner_result.cood,
+            func_ctx_stack: vec![],
             global_symbol,
+            exported_symbols: Vec::new(),
+            string_pool,
             //num_upvalues: vec![0],
             depth: 0,
+        }
+    }
+
+    pub fn finish(mut self) -> ParserResult {
+        ParserResult {
+            chunk: self.chunk.pop().unwrap(),
+            exported_symbols: self.exported_symbols,
         }
     }
     pub fn parse_prog(&mut self) -> Result<(), String> {
@@ -84,16 +113,7 @@ impl ParserCtx {
                 return Err("incomplete program".to_owned());
             }
         }
-        if let Err(s) = self.parse() {
-            if s == "EOF" {
-                self.emit_with_line(Instr::Return, self.token_cood.last().unwrap().0);
-                Ok(())
-            } else {
-                Err(s)
-            }
-        } else {
-            Ok(())
-        }
+        self.parse()
     }
     fn parse(&mut self) -> Result<(), String> {
         loop {
@@ -121,9 +141,6 @@ impl ParserCtx {
                 Token::Return => {
                     self.parse_return()?;
                 }
-                Token::Except => {
-                    self.parse_except()?;
-                }
                 Token::Symbol(_)
                 | Token::Array
                 | Token::Dict
@@ -134,7 +151,7 @@ impl ParserCtx {
                 | Token::Not
                 | Token::Nil
                 | Token::Sub => {
-                    self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+                    self.parse_rval_expr(PrattPrecedence::Lowest)?;
                     self.emit(Instr::Pop);
                     self.consume(Token::Semicolon)?;
                 }
@@ -158,21 +175,11 @@ impl ParserCtx {
             Ok(())
         } else {
             let line = self.get_line();
-            self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+            self.parse_rval_expr(PrattPrecedence::Lowest)?;
             self.emit_with_line(Instr::Return, line);
             self.consume(Token::Semicolon)?;
             Ok(())
         }
-    }
-    fn parse_except(&mut self) -> Result<(), String> {
-        self.consume(Token::Except)?;
-
-        let line = self.get_line();
-        self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
-
-        self.emit_with_line(Instr::Except, line);
-        self.consume(Token::Semicolon)?;
-        Ok(())
     }
     #[inline]
     fn parse_argument(&mut self) -> Result<usize, String> {
@@ -182,7 +189,7 @@ impl ParserCtx {
             return Ok(0);
         }
         loop {
-            self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+            self.parse_rval_expr(PrattPrecedence::Lowest)?;
             argument_num += 1;
             let tk = self.peek_not_eof()?;
             if Token::Comma == tk {
@@ -195,13 +202,10 @@ impl ParserCtx {
         }
     }
     #[inline]
-    fn emit_get_symbol(&mut self, symbol: &str, line: usize) -> Result<(), String> {
-        match self.resolve_local(symbol) {
+    fn emit_get_symbol(&mut self, symbol: &IString, line: usize) -> Result<(), String> {
+        match self.resolve(symbol, self.depth) {
             VarLoc::Local(x) => {
                 self.emit_with_line(Instr::GetLocal(x), line);
-            }
-            VarLoc::UpLocal(x) => {
-                self.emit_with_line(Instr::GetUpValue(x), line);
             }
             VarLoc::UpValue(x) => {
                 self.emit_with_line(Instr::GetUpValue(x), line);
@@ -216,18 +220,18 @@ impl ParserCtx {
         Ok(())
     }
     #[inline]
-    fn emit_set_symbol(&mut self, symbol: &str, line: usize) -> Result<(), String> {
-        match self.resolve_local(symbol) {
+    fn emit_set_symbol(&mut self, symbol: &IString, line: usize) -> Result<(), String> {
+        match self.resolve(symbol, self.depth) {
             VarLoc::Local(x) => {
                 self.emit_with_line(Instr::SetLocal(x), line);
-            }
-            VarLoc::UpLocal(x) => {
-                self.emit_with_line(Instr::SetUpValue(x), line);
             }
             VarLoc::UpValue(x) => {
                 self.emit_with_line(Instr::SetUpValue(x), line);
             }
-            _ => {
+            VarLoc::Global(x) => {
+                self.emit_with_line(Instr::SetGlobal(x), line);
+            }
+            VarLoc::NotFound => {
                 return Err(self.parser_err_str((format!("symbol not found:{}", symbol)).as_str()));
             }
         }
@@ -242,13 +246,13 @@ impl ParserCtx {
             return Err(self.parser_err_str("invalid function declaration."));
         }
         self.advance();
-        self.add_local(symbol)?;
+        self.add_local(&symbol)?;
         self.open_env();
         self.consume(Token::LParen)?;
         let mut para_num = 0;
         while let Token::Symbol(s) = self.peek_not_eof()? {
             self.advance();
-            self.add_local(s)?;
+            self.add_local(&s)?;
             para_num += 1;
             match self.consume(Token::Comma) {
                 Ok(()) => {}
@@ -268,7 +272,10 @@ impl ParserCtx {
         self.consume(Token::RBrace)?;
         let mut chunk = self.close_env();
         chunk.parameter_num = para_num;
-        self.load_value(Value::Chunk(chunk));
+        self.chunk.last_mut().unwrap().chunks.push(chunk);
+        self.emit(Instr::LoadChunk(
+            self.chunk.last().unwrap().chunks.len() - 1,
+        ));
         self.emit(Instr::SetLocal(self.chunk[self.depth].num_locals - 1));
         self.emit(Instr::Pop);
         Ok(())
@@ -286,14 +293,14 @@ impl ParserCtx {
             //declaration with assignment
             if Token::Equal == tok {
                 self.advance();
-                self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
-                self.add_local(symbol)?;
+                self.parse_rval_expr(PrattPrecedence::Lowest)?;
+                self.add_local(&symbol)?;
                 self.emit(Instr::SetLocal(self.chunk[self.depth].num_locals - 1));
                 self.emit(Instr::Pop);
                 return Ok(());
             }
         }
-        self.add_local(symbol)?;
+        self.add_local(&symbol)?;
         self.consume(Token::Semicolon)?;
         Ok(())
     }
@@ -301,15 +308,17 @@ impl ParserCtx {
         self.consume(Token::While)?;
         self.consume(Token::LParen)?;
         let jumpback_point = self.chunk[self.depth].bytecodes.len();
-        self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+        self.parse_rval_expr(PrattPrecedence::Lowest)?;
         let patch_point = self.chunk[self.depth].bytecodes.len();
         self.emit(Instr::JumpIfNot(0)); // to be patched
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
+        self.open_block();
         self.parse()?;
         self.emit(Instr::Jump(
             jumpback_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
         ));
+        self.close_block();
         self.consume(Token::RBrace)?;
         self.chunk[self.depth].bytecodes[patch_point] =
             Instr::JumpIfNot(self.chunk[self.depth].bytecodes.len() as i32 - patch_point as i32);
@@ -317,30 +326,29 @@ impl ParserCtx {
     }
     fn parse_block(&mut self) -> Result<(), String> {
         self.consume(Token::LBrace)?;
-        self.open_env();
+        self.open_block();
         self.parse()?;
 
-        let res = self.close_env();
-        self.emit(Instr::Load(self.chunk[self.depth].constants.len()));
-        self.emit(Instr::Call(0));
-        self.add_annoymos_closure(res);
+        self.close_block();
         self.consume(Token::RBrace)?;
         Ok(())
     }
     fn parse_if(&mut self) -> Result<(), String> {
         self.consume(Token::If)?;
         self.consume(Token::LParen)?;
-        self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+        self.parse_rval_expr(PrattPrecedence::Lowest)?;
         let patch_point = self.chunk[self.depth].bytecodes.len();
         // emit an empty slot, jump to FALSE branch but FALSE branch is now not parsed.
         self.emit(Instr::JumpIfNot(0));
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
+        self.open_block();
         self.parse()?;
         let patch_point2 = self.chunk[self.depth].bytecodes.len();
         // emit an empty slot, jump to end of if statement, but we still don't know if there
         // is an else clause, Jump(0) is just nop.
         self.emit(Instr::Jump(0));
+        self.close_block();
         self.consume(Token::RBrace)?;
         self.chunk[self.depth].bytecodes[patch_point] =
             Instr::JumpIfNot((self.chunk[self.depth].bytecodes.len() - patch_point) as i32);
@@ -348,7 +356,9 @@ impl ParserCtx {
             if Token::Else == tok {
                 self.advance();
                 self.consume(Token::LBrace)?;
+                self.open_block();
                 self.parse()?;
+                self.close_block();
                 self.consume(Token::RBrace)?;
                 self.chunk[self.depth].bytecodes[patch_point2] =
                     Instr::Jump((self.chunk[self.depth].bytecodes.len() - patch_point2) as i32);
@@ -356,100 +366,221 @@ impl ParserCtx {
         }
         Ok(())
     }
+    /// open function level env
     #[inline]
     fn open_env(&mut self) {
         self.chunk.push(Chunk::default());
-        self.symbol_table.push(HashMap::new());
-        self.symbol_captured.push(Vec::new());
+        self.func_ctx_stack.push(FuncCtx::default());
+        self.func_ctx_stack
+            .last_mut()
+            .unwrap()
+            .block_ctx_stack
+            .push(BlockCtx::default());
         self.depth += 1;
     }
+    /// close function level env
     #[inline]
     fn close_env(&mut self) -> Chunk {
         self.emit_with_line(Instr::Return, 0);
         self.depth -= 1;
-        self.symbol_table.pop();
-        self.symbol_captured.pop();
+        self.func_ctx_stack.pop();
         self.chunk.pop().unwrap()
     }
+    /// open block level env
     #[inline]
-    fn add_annoymos_closure(&mut self, chunk: Chunk) {
-        self.chunk[self.depth].constants.push(Value::Chunk(chunk));
+    fn open_block(&mut self) {
+        self.func_ctx_stack
+            .last_mut()
+            .unwrap()
+            .block_ctx_stack
+            .push(BlockCtx::default());
     }
-    fn add_local(&mut self, symbol: String) -> Result<(), String> {
-        if self.symbol_table[self.depth].get(&symbol) != None {
+    /// close block level env
+    #[inline]
+    fn close_block(&mut self) {
+        self.func_ctx_stack
+            .last_mut()
+            .unwrap()
+            .block_ctx_stack
+            .pop();
+    }
+    
+
+    fn add_local(&mut self, symbol: &IString) -> Result<(), String> {
+        if self.depth == 0 {
+            // outermost scope => Global
+            let s = symbol.clone();
+            self.exported_symbols.push(s);
+            return Ok(());
+        }
+        if self.func_ctx_stack[self.depth]
+            .block_ctx_stack
+            .last()
+            .unwrap()
+            .symbol_table
+            .get(symbol)
+            != None
+        {
             return Err(self.parser_err_str("redeclaration of symbol"));
         }
-        self.symbol_table[self.depth].insert(symbol, self.chunk[self.depth].num_locals);
-        self.symbol_captured[self.depth].push(false);
+        let num_locals = self.chunk[self.depth].num_locals;
+        self.func_ctx_stack[self.depth]
+            .block_ctx_stack
+            .last_mut()
+            .unwrap()
+            .symbol_table
+            .insert(symbol.clone(), num_locals);
+        self.func_ctx_stack[self.depth]
+            .block_ctx_stack
+            .last_mut()
+            .unwrap()
+            .symbol_captured
+            .push(false);
         self.chunk[self.depth].num_locals += 1;
         Ok(())
     }
-    pub fn parse_rval_expr(
+
+    fn parse_assign_or_rval_expr(&mut self) -> Result<(), String> {
+        if let Token::Symbol(s) = self.peek_not_eof()? {
+            match self.resolve(&s, self.depth) {
+                VarLoc::Local(x) => self.emit(Instr::GetLocal(x)),
+                VarLoc::UpValue(x) => self.emit(Instr::GetUpValue(x)),
+                VarLoc::Global(x) => self.emit(Instr::GetGlobal(x)),
+                _ => {
+                    return Err(self.parser_err_str("symbol not found"));
+                }
+            }
+            self.advance();
+            let mut is_assign = true;
+            while let Some(tk) = self.peek() {
+                if tk == Token::EEqual {
+                    break;
+                } else if tk == Token::LBracket {
+                    let line = self.get_line();
+                    self.advance();
+                    self.parse_rval_expr(PrattPrecedence::Lowest)?;
+                    self.consume(Token::RBracket)?;
+                    self.emit_with_line(Instr::GetCollection, line);
+                    continue;
+                } else if tk == Token::Dot {
+                    let line = self.get_line();
+                    self.advance();
+                    if let Token::Symbol(s) = self.peek_not_eof()? {
+                        self.load_value(Value::String(s));
+                        self.advance();
+                    } else {
+                        return Err(self.parser_err_str("invalid rval expr"));
+                    }
+                    self.emit_with_line(Instr::GetCollection, line);
+                    continue;
+                } else {
+                    is_assign = false;
+                    break;
+                }
+            }
+            if is_assign {
+                // consume '='
+                self.advance();
+                // change get operation to corresponging set operation
+                let last_instr = self.chunk[self.depth].bytecodes.pop().unwrap();
+                self.parse_rval_expr(PrattPrecedence::Lowest)?;
+                // now value is on the top of stack
+                let modified_instr = match last_instr {
+                    Instr::GetCollection => {
+                        // idx already on stack[top-1]
+                        Instr::SetCollection
+                    }
+                    Instr::GetLocal(x) => Instr::SetLocal(x),
+                    Instr::GetGlobal(x) => Instr::SetGlobal(x),
+                    Instr::GetUpValue(x) => Instr::SetUpValue(x),
+                    _ => {
+                        unreachable!()
+                    }
+                };
+                self.emit(modified_instr);
+            } else {
+                // already parsed a symbol
+                // no bracktrack
+                self.parse_rval_expr2(PrattPrecedence::Lowest, true)?;
+            }
+        } else {
+            self.parse_rval_expr(PrattPrecedence::Lowest)?;
+        }
+        Ok(())
+    }
+
+    pub fn parse_rval_expr(&mut self, prec: PrattPrecedence) -> Result<(), String> {
+        self.parse_rval_expr2(prec, false)
+    }
+
+    /// [`maybe_assign`] indicates that we have already parsed a symbol
+    pub fn parse_rval_expr2(
         &mut self,
         prec: PrattPrecedence,
-        decl_symbol: Option<&str>,
+        maybe_assign: bool,
     ) -> Result<(), String> {
         // Pratt Parser
-        match self.peek_not_eof()? {
-            Token::Symbol(s) => {
-                match self.resolve_local(&s) {
-                    VarLoc::Local(x) => self.emit(Instr::GetLocal(x)),
-                    VarLoc::UpValue(x) => self.emit(Instr::GetUpValue(x)),
-                    VarLoc::UpLocal(x) => self.emit(Instr::GetUpValue(x)),
-                    VarLoc::Global(x) => self.emit(Instr::GetGlobal(x)),
-                    _ => {
-                        return Err(self.parser_err_str("symbol not found"));
+        if !maybe_assign {
+            match self.peek_not_eof()? {
+                Token::Symbol(s) => {
+                    match self.resolve(&s, self.depth) {
+                        VarLoc::Local(x) => self.emit(Instr::GetLocal(x)),
+                        VarLoc::UpValue(x) => self.emit(Instr::GetUpValue(x)),
+                        VarLoc::Global(x) => self.emit(Instr::GetGlobal(x)),
+                        _ => {
+                            return Err(self.parser_err_str("symbol not found"));
+                        }
                     }
+                    self.advance();
                 }
-                self.advance();
-            }
-            Token::Number(x) => {
-                self.load_value(Value::Number(x));
-                self.advance();
-            }
-            Token::String(s) => {
-                self.load_value(Value::String(s));
-                self.advance();
-            }
-            Token::True => {
-                self.emit(Instr::LoadTrue);
-                self.advance();
-            }
-            Token::False => {
-                self.emit(Instr::LoadFalse);
-                self.advance();
-            }
-            Token::Nil => {
-                self.emit(Instr::PushNil);
-            }
+                Token::Number(x) => {
+                    self.load_value(Value::Number(x));
+                    self.advance();
+                }
+                Token::String(s) => {
+                    self.load_value(Value::String(s));
+                    self.advance();
+                }
+                Token::True => {
+                    self.emit(Instr::LoadTrue);
+                    self.advance();
+                }
+                Token::False => {
+                    self.emit(Instr::LoadFalse);
+                    self.advance();
+                }
+                Token::Nil => {
+                    self.emit(Instr::PushNil);
+                }
 
-            Token::Array => {
-                self.parse_array()?;
-            }
-            Token::Dict => {
-                self.parse_dict()?;
-            }
-            Token::Sub => {
-                let line = self.token_cood[self.ptr].0;
-                self.advance();
-                self.parse_rval_expr(PrattPrecedence::Unary, decl_symbol)?;
-                self.emit_with_line(Instr::Negate, line);
-            }
-            Token::Not => {
-                let line = self.token_cood[self.ptr].0;
-                self.advance();
-                self.parse_rval_expr(PrattPrecedence::Unary, decl_symbol)?;
-                self.emit_with_line(Instr::Not, line);
-            }
-            Token::LParen => {
-                self.advance();
-                self.parse_rval_expr(PrattPrecedence::Lowest, decl_symbol)?;
-                self.consume(Token::RParen)?;
-            }
-            _ => {
-                //println!("{:?}", c);
-                return Ok(());
-                //unimplemented!();
+                Token::Array => {
+                    self.parse_array()?;
+                }
+                Token::Dict => {
+                    self.parse_dict()?;
+                }
+                Token::Sub => {
+                    let line = self.token_cood[self.ptr].0;
+                    self.advance();
+                    self.parse_rval_expr(PrattPrecedence::Unary)?;
+                    self.emit_with_line(Instr::Negate, line);
+                }
+                Token::Not => {
+                    let line = self.token_cood[self.ptr].0;
+                    self.advance();
+                    self.parse_rval_expr(PrattPrecedence::Unary)?;
+                    self.emit_with_line(Instr::Not, line);
+                }
+                Token::LParen => {
+                    self.advance();
+                    self.parse_rval_expr(PrattPrecedence::Lowest)?;
+                    self.consume(Token::RParen)?;
+                }
+                _ => {
+                    //println!("{:?}", c);
+                    return Ok(());
+                    //unimplemented!();
+                }
             }
         }
         while let Some(tk) = self.peek() {
@@ -470,7 +601,7 @@ impl ParserCtx {
             if tk == Token::LBracket {
                 let line = self.get_line();
                 self.advance();
-                self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+                self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 self.consume(Token::RBracket)?;
                 self.emit_with_line(Instr::GetCollection, line);
                 continue;
@@ -493,7 +624,7 @@ impl ParserCtx {
                     break;
                 }
                 self.advance();
-                self.parse_rval_expr(nprec, decl_symbol)?;
+                self.parse_rval_expr(nprec)?;
             } else {
                 return Ok(());
             }
@@ -507,7 +638,7 @@ impl ParserCtx {
                 Token::LSlash => {
                     self.emit_with_line(Instr::Div, line);
                 }
-                Token::Percent => {
+                Token::Mod => {
                     self.emit_with_line(Instr::Mod, line);
                 }
                 Token::Star => {
@@ -569,7 +700,7 @@ impl ParserCtx {
             }
             self.advance();
             self.consume(Token::Colon)?;
-            self.parse_rval_expr(PrattPrecedence::Lowest, None)?;
+            self.parse_rval_expr(PrattPrecedence::Lowest)?;
             if Token::RParen == self.peek_not_eof()? {
                 num_arg += 1;
                 break;
@@ -651,8 +782,9 @@ impl ParserCtx {
         self.chunk[self.depth].lines.push(line);
     }
     #[inline]
-    fn push_constant(&mut self, c: Value) {
+    fn push_constant(&mut self, c: Value) -> usize {
         self.chunk[self.depth].constants.push(c);
+        return self.chunk[self.depth].constants.len() - 1;
     }
     #[inline]
     fn load_value(&mut self, v: Value) {
@@ -663,153 +795,60 @@ impl ParserCtx {
         {
             self.emit(Instr::Load(x));
         } else {
-            self.push_constant(v);
-            self.emit(Instr::Load(self.chunk[self.depth].constants.len() - 1));
+            let idx = self.push_constant(v);
+            self.emit(Instr::Load(idx));
         }
     }
-    #[inline]
-    fn resolve_local(&mut self, symbol: &str) -> VarLoc {
-        if let Some(x) = self.symbol_table[self.depth].get(symbol) {
-            return VarLoc::Local(*x);
-        } else if let Some(x) = self.chunk[self.depth]
-            .upvalues
-            .iter()
-            .position(|upv| match upv {
-                UpValueDecl::Ref(_, s) => s == symbol,
-                UpValueDecl::RefUpValue(_, s) => s == symbol,
-            })
-        {
-            return VarLoc::UpValue(x);
-        } else if self.depth >= 1 {
-            match self.resolve(symbol, self.depth - 1) {
-                VarLoc::UpLocal(x) => {
-                    self.chunk[self.depth]
-                        .upvalues
-                        .push(UpValueDecl::Ref(x, symbol.to_owned()));
-                    return VarLoc::UpValue(self.chunk[self.depth].upvalues.len() - 1);
-                }
-                VarLoc::UpValue(x) => {
-                    self.chunk[self.depth]
-                        .upvalues
-                        .push(UpValueDecl::RefUpValue(x, symbol.to_owned()));
-                    return VarLoc::UpValue(self.chunk[self.depth].upvalues.len() - 1);
-                }
-                _ => {}
+
+    fn resolve(&mut self, symbol: &IString, depth: usize) -> VarLoc {
+        if depth == 0 {
+            // stacktop = GLOBAL[constant[idx]]
+            let idx = self.push_constant(Value::String(symbol.clone()));
+            return VarLoc::Global(idx);
+        }
+        // from innermost Block to outermost Block of current Function
+        for ctx in self.func_ctx_stack[depth].block_ctx_stack.iter().rev() {
+            if let Some(x) = ctx.symbol_table.get(symbol) {
+                return VarLoc::Local(*x);
             }
         }
-        if let Some(x) = self.global_symbol.get(symbol) {
-            return VarLoc::Global(*x);
-        }
-        VarLoc::NotFound
-    }
-    fn resolve(&mut self, symbol: &str, dep: usize) -> VarLoc {
-        if let Some(x) = self.symbol_table[dep].get(symbol) {
-            self.symbol_captured[dep][*x] = true;
-            return VarLoc::UpLocal(*x);
-        }
-        if let Some(x) = self.chunk[dep].upvalues.iter().position(|upv| match upv {
+        if let Some(x) = self.chunk[depth].upvalues.iter().position(|upv| match upv {
             UpValueDecl::Ref(_, s) => s == symbol,
             UpValueDecl::RefUpValue(_, s) => s == symbol,
         }) {
             return VarLoc::UpValue(x);
         }
-        if dep == 0 {
-            return VarLoc::NotFound;
-        }
-        match self.resolve(symbol, dep - 1) {
-            VarLoc::UpLocal(x) => {
-                self.chunk[dep]
+        let ret = self.resolve(symbol, depth - 1);
+        match ret {
+            VarLoc::Local(x) => {
+                // local variable of outer function
+                // add to upvalue list of this function
+                self.chunk[depth]
                     .upvalues
-                    .push(UpValueDecl::Ref(x, symbol.to_owned()));
-                VarLoc::UpValue(self.chunk[dep].upvalues.len() - 1)
+                    .push(UpValueDecl::Ref(x, symbol.clone()));
+                return VarLoc::UpValue(self.chunk[depth].upvalues.len() - 1);
             }
             VarLoc::UpValue(x) => {
-                self.chunk[dep]
+                // upvalue of outer function
+                self.chunk[depth]
                     .upvalues
-                    .push(UpValueDecl::RefUpValue(x, symbol.to_owned()));
-                VarLoc::UpValue(self.chunk[dep].upvalues.len() - 1)
+                    .push(UpValueDecl::RefUpValue(x, symbol.clone()));
+                return VarLoc::UpValue(self.chunk[depth].upvalues.len() - 1);
             }
-            VarLoc::NotFound => VarLoc::NotFound,
-            _ => VarLoc::NotFound,
+            VarLoc::Global(x) => {
+                // Global variable
+                return VarLoc::Global(x);
+            }
+            VarLoc::NotFound => {
+                return VarLoc::NotFound;
+            }
         }
     }
+
     #[inline]
     fn get_line(&self) -> usize {
         self.token_cood[self.ptr].0
     }
 }
 #[cfg(test)]
-mod test {
-    #[test]
-    fn parse_test0() {
-        let src = r#"
-            (3 + 42) * 5 / 3 % 2 * (2 + 5) + 4;
-        "#;
-        use crate::compiler::scanner::ScannerCtx;
-        use std::collections::HashMap;
-        let mut scanner = ScannerCtx::new(src);
-        println!("{:?}", scanner.parse());
-        println!("{:?}", scanner.tokens);
-        println!("{:?}", scanner.cood);
-        use super::{ParserCtx, PrattPrecedence};
-        let mut parser = ParserCtx::new(scanner.tokens, scanner.cood, HashMap::new());
-        println!(
-            "{:?}",
-            parser.parse_rval_expr(PrattPrecedence::Lowest, None)
-        );
-        println!("{:?}", parser.chunk[0].bytecodes);
-        println!("{:?}", parser.chunk[0].lines);
-        println!("{:?}", parser.chunk[0].constants);
-    }
-    #[test]
-    fn parse_test1() {
-        let src = r#"
-            func f(a,b){
-                var c = 3;
-                func g(){
-                    assign c = c + 1;
-                }
-            }
-            var a = 3;
-            if (a){
-                assign a = a - 1;
-            } else {
-                assign a = a + 1;
-            }
-            while(a){
-                assign a = a - 1;
-            }
-            
-        "#;
-        use crate::compiler::scanner::ScannerCtx;
-        use std::collections::HashMap;
-        let mut scanner = ScannerCtx::new(src);
-        println!("{:?}", scanner.parse());
-        println!("{:?}", scanner.tokens);
-        println!("{:?}", scanner.cood);
-        use super::{ParserCtx, PrattPrecedence};
-        let mut parser = ParserCtx::new(scanner.tokens, scanner.cood, HashMap::new());
-        println!("{:?}", parser.parse());
-        println!("code:{:?}", parser.chunk[0]);
-    }
-    #[test]
-    fn parse_test2() {
-        let src = r#"
-            var a = 0;
-            assign a = a + 1;
-            var d = Dict("a">4+3,"b">Array(2,4));
-            var t = Array(2,4,Array(2,3));
-            assign t[2][0] = 3;
-        "#;
-        use crate::compiler::scanner::ScannerCtx;
-        use std::collections::HashMap;
-        let mut scanner = ScannerCtx::new(src);
-        println!("{:?}", scanner.parse());
-        println!("{:?}", scanner.tokens);
-        println!("{:?}", scanner.cood);
-        use super::ParserCtx;
-        let mut parser = ParserCtx::new(scanner.tokens, scanner.cood, HashMap::new());
-        println!("{:?}", parser.parse());
-        println!("code:{:?}", parser.chunk[0]);
-    }
-}
+mod test {}

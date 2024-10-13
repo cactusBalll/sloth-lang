@@ -1,10 +1,12 @@
 pub mod parser;
 pub mod scanner;
+
+use crate::interned_string::IString;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     Number(f64),
-    String(String),
-    Symbol(String),
+    String(IString),
+    Symbol(IString),
     True,
     False,
     Dict,
@@ -17,6 +19,7 @@ pub enum Token {
     Add,
     Sub,
     LSlash,
+    Mod,
 
     Percent,
     Star,

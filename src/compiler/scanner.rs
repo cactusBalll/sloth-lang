@@ -1,17 +1,23 @@
 use super::*;
+use crate::interned_string::{IString, StringPool};
 use std::collections::HashMap;
-pub struct ScannerCtx {
+pub struct ScannerCtx<'a> {
     src: Vec<char>,
     pub tokens: Vec<Token>,
     pub cood: Vec<(usize, usize)>, // row & col
+    pub string_pool: &'a mut StringPool,
     ptr: usize,
     row: usize,
     col: usize,
     len: usize,
 }
 
-impl ScannerCtx {
-    pub fn new(src: &str) -> ScannerCtx {
+pub struct ScannerResult {
+    pub tokens: Vec<Token>,
+    pub cood: Vec<(usize, usize)>,
+}
+impl<'a> ScannerCtx<'a> {
+    pub fn new(src: &str, string_pool: &'a mut StringPool) -> ScannerCtx<'a> {
         let mut char_serial = Vec::new();
         for c in src.chars() {
             char_serial.push(c);
@@ -21,10 +27,18 @@ impl ScannerCtx {
             src: char_serial,
             tokens: Vec::new(),
             cood: Vec::new(),
+            string_pool: string_pool,
             ptr: 0,
             row: 1,
             col: 1,
             len: t,
+        }
+    }
+
+    pub fn finish(self) -> ScannerResult {
+        ScannerResult {
+            tokens: self.tokens,
+            cood: self.cood,
         }
     }
     pub fn parse(&mut self) -> Result<(), String> {
@@ -45,6 +59,7 @@ impl ScannerCtx {
             ("Nil", Token::Nil),
             ("return", Token::Return),
             ("except", Token::Except),
+            ("mod", Token::Mod),
         ]);
         let single_punct_map: HashMap<char, Token> = HashMap::from([
             ('|', Token::Stick),
@@ -96,6 +111,7 @@ impl ScannerCtx {
                             self.tokens.push(keyword_map[s].clone());
                         }
                         _ => {
+                            let s = self.string_pool.creat_istring(&s);
                             let s = Token::Symbol(s);
                             self.tokens.push(s);
                         }
@@ -103,7 +119,9 @@ impl ScannerCtx {
                     self.record_pos();
                 }
                 '\"' => {
-                    let s = Token::String(self.string()?);
+                    let s = self.string()?;
+                    let s = self.string_pool.creat_istring(&s);
+                    let s = Token::String(s);
                     self.tokens.push(s);
                     self.record_pos();
                 }
@@ -293,24 +311,5 @@ impl ScannerCtx {
 }
 #[cfg(test)]
 mod test {
-    #[test]
-    fn lex_test0() {
-        use super::ScannerCtx;
-        let mut scanner = ScannerCtx::new(
-            r#"
-            var a = 3;
-            var b = 4;
-            {
-                var c = 5;
-                var a = 6;
-                var a = if (a >= c) {a} else {c};
-                var f = |x|{x + 1};
-            }
-            "23333\n322"
-        "#,
-        );
-        println!("{:?}", scanner.parse());
-        println!("{:?}", scanner.tokens);
-        println!("{:?}", scanner.cood)
-    }
+    
 }

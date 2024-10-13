@@ -1,7 +1,12 @@
-- parser 对 EOF 的处理
-- 移除奇怪的assign（强行LL(1)
+- parser 对 EOF 的处理 done
+- 移除奇怪的assign（强行LL(1) done
 - && || 短路运算
 - 重构vm
 - 移除不需要的内置类型 done
-- 重构interned string
+- 重构interned string done
 - 消除warning
+- fiber
+- module
+- 重构chunk done
+- Class-based OOP
+- OCaml style PIPE Operator `|>`
