@@ -6,49 +6,41 @@ mod vm;
 
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
+use std::io::Write;
 
 use compiler::parser::{self, ParserCtx};
 use compiler::scanner::{self, ScannerCtx};
 use interned_string::{IString, StringPool};
+use native::sloth_print_val;
 use vm::{CallFrame, Vm};
 
-pub fn run_string_debug(prog: &str) -> Result<(), String> {
-    // let mut scanner = compiler::scanner::ScannerCtx::new(prog);
-    // if let Err(e) = scanner.parse() {
-    //     if e != "EOF" {
-    //         return Err(e);
-    //     }
-    // }
-    // println!("{:?}", scanner.tokens);
-    // println!("{:?}", native::native_map_parser());
-    // let mut parser =
-    //     compiler::parser::ParserCtx::new(scanner.tokens, scanner.cood, native::native_map_parser());
-    // if let Err(e) = parser.parse_prog() {
-    //     if e != "EOF" {
-    //         return Err(e);
-    //     }
-    // }
-    // let chunk = parser.chunk.pop().unwrap();
-    // println!("{chunk:?}");
-    // let mut vm = vm::Vm::new(chunk, native::native_map_vm(), true);
-    // vm.run()?;
-    Ok(())
-}
-pub fn run_string(prog: &str) -> Result<(), String> {
+pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
     let mut string_pool = StringPool::new();
     let mut scanner = ScannerCtx::new(prog, &mut string_pool);
     scanner.parse()?;
     let scanner_result = scanner.finish();
+    println!("{:?}", scanner_result.tokens);
     let mut parser = ParserCtx::new(scanner_result, HashMap::new(), &mut string_pool);
     parser.parse_prog()?;
     let parser_result = parser.finish();
+    println!("{:?}", parser_result.chunk);
+    let _ = std::io::stdout().flush();
     let mut vm = Box::new(Vm::new(
         parser_result.chunk,
         HashMap::new(),
         string_pool,
         true,
     ));
-    vm.run()?;
+    vm.load_native_module(
+        None,
+        vec![(
+            "print".to_owned(),
+            Value::NativeFunction(sloth_print_val as *mut u8),
+        )],
+    );
+    if !only_compile {
+        vm.run()?;
+    }
     Ok(())
 }
 
@@ -57,6 +49,7 @@ pub enum Value {
     Nil,
     Bool(bool),
     Number(f64),
+    Range(f64, f64),
     String(IString),
     //Symbol(IString),
     Array(*mut Array),
@@ -68,6 +61,9 @@ pub enum Value {
     /// NativeFunctions may use it
     OpaqueData(*mut u8),
     Fiber(*mut Fiber),
+
+    Klass(*mut Klass),
+    Instance(*mut Instance),
 }
 
 trait GCObject {
@@ -165,6 +161,14 @@ impl GCObject for Closure {
                 }
             }
         }
+        unsafe {
+            if let Some(has_this_ref) = self.this_ref {
+                if !(*has_this_ref).is_marked() {
+                    (*has_this_ref).mark();
+                    (*has_this_ref).mark_children();
+                }
+            }
+        }
     }
 }
 impl GCObject for Dict {
@@ -176,6 +180,35 @@ impl GCObject for Dict {
     }
 }
 
+impl GCObject for Klass {
+    gcobject_header!();
+    fn mark_children(&mut self) {
+        unsafe {
+            if !(*self.super_klass).is_marked() {
+                (*self.super_klass).mark();
+                (*self.super_klass).mark_children();
+            }
+        }
+        for val in self.methods.values() {
+            mark_proc!(val);
+        }
+    }
+}
+
+impl GCObject for Instance {
+    gcobject_header!();
+    fn mark_children(&mut self) {
+        unsafe {
+            if !(*self.klass).is_marked() {
+                (*self.klass).mark();
+                (*self.klass).mark_children();
+            }
+        }
+        for val in self.fields.values() {
+            mark_proc!(val);
+        }
+    }
+}
 impl GCObject for Fiber {
     gcobject_header!();
     fn mark_children(&mut self) {
@@ -248,6 +281,20 @@ pub struct Fiber {
     pub prev: *mut Fiber,
 }
 
+#[derive(Debug)]
+pub struct Klass {
+    pub marked: bool,
+    pub super_klass: *mut Klass,
+    pub methods: HashMap<IString, Value>,
+}
+
+#[derive(Debug)]
+pub struct Instance {
+    pub marked: bool,
+    pub klass: *mut Klass,
+    pub fields: HashMap<IString, Value>,
+}
+
 #[derive(Debug, Clone)]
 pub enum UpValueDecl {
     Ref(usize, IString),
@@ -280,6 +327,7 @@ pub struct Chunk {
     pub upvalues: Vec<UpValueDecl>,
     pub parameter_num: usize,
     pub num_locals: usize,
+    pub is_va: bool,
 }
 impl PartialEq for Chunk {
     fn eq(&self, _other: &Self) -> bool {
@@ -294,6 +342,7 @@ impl Debug for Chunk {
         }
         writeln!(f, "constants: {:?}", self.constants)?;
         writeln!(f, "upvalues: {:?}", self.upvalues)?;
+        writeln!(f, "chunks: {:?}", self.chunks)?;
         writeln!(f)?;
         Ok(())
     }
@@ -304,6 +353,7 @@ pub struct Closure {
     pub marked: bool,
     pub chunk: *const Chunk,
     pub upvalues: Vec<*mut UpValueObject>,
+    pub this_ref: Option<*mut Instance>,
 }
 impl PartialEq for Closure {
     fn eq(&self, other: &Self) -> bool {
@@ -312,6 +362,8 @@ impl PartialEq for Closure {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Instr {
+    Nop,
+
     Load(usize),
     LoadChunk(usize),
     GetGlobal(usize),
@@ -348,22 +400,86 @@ pub enum Instr {
     LoadFalse,
 
     Pop,
+    Swap2,       /*change top 2 value on the stack*/
     Call(usize), /*parameter num*/
+
     TryCall(usize),
     JumpIfNot(i32),
+    JumpIfTrue(i32),
     Jump(i32),
     Return,
     Except,
 
-    Concat,
+    MakeRange,
+    MakeRangeClosed,
+
+    Iterator,
+    Next,
+
+    InitClass,
+    AddMethod,
+    ClassExtend,
+    GetSuperMethod,
+    GetThis,
 }
-type NativeFunction = fn(&mut Vec<Value>, usize, bool) -> Value;
+type NativeFunction = fn(&mut Vm, usize, bool);
 #[cfg(test)]
 mod test {
+    use super::run_string;
     #[test]
-    fn test0() {
-        assert!('\t'.is_whitespace());
-        let mut b = Box::new(666);
-        assert_eq!(b.as_mut() as *mut usize, Box::into_raw(b));
+    fn pipe_test() {
+        let src = r#"
+            func mul2(a) {
+                return a * 2;
+            }
+            print(2 |> mul2 |> mul2 |> mul2);
+        "#;
+        let res = run_string(&src, false);
+        println!("{:?}", res);
+    }
+    #[test]
+    fn class_test() {
+        let src = r#"
+            class Mammal{
+                func __init__() {
+                    this.weight = 100;
+                    this.height = 100;
+                }
+                func say() {
+                    print("Mammal", this.weight, this.height);
+                }
+            }
+
+            class Cat:Mammal{
+                func __init__() {
+                    super.__init__();
+                    this.height = 70;
+                }
+            }
+
+            var cat = Cat();
+            cat.say();
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn container_test() {
+        let src = r#"
+            var a = @("a":3, "b": [1,2,3]);
+            print(a["a"], a.b[1]);
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn short_circuit_test() {
+        let src = r#"
+            (1 < 2) or ||{print("not executed");}();
+            (1 < 2) and ||{print("executed");}();
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
     }
 }

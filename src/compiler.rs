@@ -27,6 +27,9 @@ pub enum Token {
     Question,
 
     While,
+    For,
+    Break,
+    Continue,
     Var,
     If,
     Else,
@@ -53,8 +56,37 @@ pub enum Token {
     Ge,
     Array,
     Function,
-    Assign,
 
     Return,
     Except,
+
+    PipeOp,    // |>
+    AddAssign, // +=
+    SubAssign, // -=
+    MulAssign, // *=
+    DivAssign, // /=
+    ModAssign, // %=
+
+    Class,
+    Super,    //super.
+    This,
+
+    Dots,     //..
+    DotsEq,   //..=
+    ThreeDots, //...
+}
+
+impl Token {
+    pub fn is_assign(&self) -> bool {
+        *self == Token::Equal
+            || self.is_op_assign()
+    }
+
+    pub fn is_op_assign(&self) -> bool {
+        *self == Token::AddAssign
+            || *self == Token::SubAssign
+            || *self == Token::MulAssign
+            || *self == Token::DivAssign
+            || *self == Token::ModAssign
+    }
 }

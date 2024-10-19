@@ -1,9 +1,9 @@
 //use std::collections::HashMap;
-use std::fmt::{self, Display};
+use std::fmt::{self, Debug, Display};
 use std::hash::Hash;
 use std::ptr;
 
-#[derive(Debug, Eq, Hash)]
+#[derive(Eq, Hash)]
 pub struct IString {
     data: *mut StringPoolEntry,
 }
@@ -28,7 +28,12 @@ impl Display for IString {
     }
 }
 
-
+impl Debug for IString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = unsafe { &(*self.data).data };
+        write!(f, "IString({:?},{})", self.data, s)
+    }
+}
 
 impl Drop for IString {
     fn drop(&mut self) {
@@ -38,6 +43,11 @@ impl Drop for IString {
     }
 }
 
+impl IString {
+    pub fn get_inner(&self) -> &str {
+        unsafe { &(*self.data).data }
+    }
+}
 struct StringPoolEntry {
     data: String,
     ref_count: usize,

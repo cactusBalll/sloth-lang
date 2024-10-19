@@ -48,18 +48,19 @@ impl<'a> ScannerCtx<'a> {
             ("not", Token::Not),
             ("true", Token::True),
             ("false", Token::False),
-            ("Dict", Token::Dict),
             ("while", Token::While),
+            ("for", Token::For),
             ("var", Token::Var),
             ("if", Token::If),
             ("else", Token::Else),
-            ("Array", Token::Array),
             ("func", Token::Function),
-            ("assign", Token::Assign),
             ("Nil", Token::Nil),
             ("return", Token::Return),
             ("except", Token::Except),
-            ("mod", Token::Mod),
+            ("class", Token::Class),
+            ("super", Token::Super),
+            ("break", Token::Break),
+            ("continue", Token::Continue),
         ]);
         let single_punct_map: HashMap<char, Token> = HashMap::from([
             ('|', Token::Stick),
@@ -82,6 +83,7 @@ impl<'a> ScannerCtx<'a> {
             ('=', Token::Equal),
             ('.', Token::Dot),
             ('?', Token::Question),
+            ('@', Token::Dict),
         ]);
         loop {
             let nxt_c = if let Some(nxt_c) = self.peek() {
@@ -127,6 +129,24 @@ impl<'a> ScannerCtx<'a> {
                 }
                 c if { c.is_ascii_punctuation() } => {
                     if let Some(ahead) = self.peekn(2) {
+                        if let Some(ahead2) = self.peekn(3) {
+                            if c == '.' && ahead == '.' && ahead2 == '=' {
+                                self.tokens.push(Token::DotsEq);
+                                self.record_pos();
+                                self.advance()?;
+                                self.advance()?;
+                                self.advance()?;
+                                continue;
+                            }
+                            if c == '.' && ahead == '.' && ahead2 == '.' {
+                                self.tokens.push(Token::ThreeDots);
+                                self.record_pos();
+                                self.advance()?;
+                                self.advance()?;
+                                self.advance()?;
+                                continue;
+                            }
+                        }
                         if c == '!' && ahead == '=' {
                             self.tokens.push(Token::NotEqual);
                             self.record_pos();
@@ -150,6 +170,55 @@ impl<'a> ScannerCtx<'a> {
                         }
                         if c == '=' && ahead == '=' {
                             self.tokens.push(Token::EEqual);
+                            self.record_pos();
+                            self.advance()?;
+                            self.advance()?;
+                            continue;
+                        }
+                        if c == '|' && ahead == '>' {
+                            self.tokens.push(Token::PipeOp);
+                            self.record_pos();
+                            self.advance()?;
+                            self.advance()?;
+                            continue;
+                        }
+                        if c == '+' && ahead == '=' {
+                            self.tokens.push(Token::AddAssign);
+                            self.record_pos();
+                            self.advance()?;
+                            self.advance()?;
+                            continue;
+                        }
+                        if c == '-' && ahead == '=' {
+                            self.tokens.push(Token::SubAssign);
+                            self.record_pos();
+                            self.advance()?;
+                            self.advance()?;
+                            continue;
+                        }
+                        if c == '*' && ahead == '=' {
+                            self.tokens.push(Token::MulAssign);
+                            self.record_pos();
+                            self.advance()?;
+                            self.advance()?;
+                            continue;
+                        }
+                        if c == '/' && ahead == '=' {
+                            self.tokens.push(Token::DivAssign);
+                            self.record_pos();
+                            self.advance()?;
+                            self.advance()?;
+                            continue;
+                        }
+                        if c == '%' && ahead == '=' {
+                            self.tokens.push(Token::ModAssign);
+                            self.record_pos();
+                            self.advance()?;
+                            self.advance()?;
+                            continue;
+                        }
+                        if c == '.' && ahead == '.' {
+                            self.tokens.push(Token::Dots);
                             self.record_pos();
                             self.advance()?;
                             self.advance()?;

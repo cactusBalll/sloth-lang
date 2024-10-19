@@ -1,7 +1,11 @@
 use interned_string::{IString, StringPool};
 
 use crate::*;
-use std::{fmt::Display, ptr::null_mut};
+use std::{
+    collections::btree_map::Range,
+    fmt::Display,
+    ptr::{self, null_mut},
+};
 #[derive(Debug)]
 pub enum EvalError {
     Error(String),
@@ -11,6 +15,7 @@ pub enum EvalError {
     IndexOutOfBound(String),
     CallError(String),
     VariableNotFound(String),
+    KeyError(String),
     GCError,
 }
 impl Display for EvalError {
@@ -30,11 +35,12 @@ pub struct Vm {
     upvalues: Vec<*mut UpValueObject>,
     objects: Vec<Box<dyn GCObject>>,
     // chunks: Vec<Chunk>,
-    top_chunk: Chunk,     // no gc during running
-    top_closure: Closure, // no gc during running
-    main_fiber: Fiber,    // no gc during running
+    top_chunk: Box<Chunk>,     // no gc during running
+    top_closure: Box<Closure>, // no gc during running
+    main_fiber: Box<Fiber>,    // no gc during running
     protected: bool,
-    global: HashMap<IString, Value>,
+    /// should load other modules in seperated global namespace
+    global: Vec<HashMap<IString, Value>>,
 
     string_pool: StringPool,
     debug: bool,
@@ -47,13 +53,16 @@ pub struct CallFrame {
     bottom: usize,
     pub closure: *mut Closure,
     pc: usize,
+
+    va_args: Vec<Value>,
 }
 impl CallFrame {
-    fn new(bottom: usize, closure: *mut Closure) -> CallFrame {
+    fn new(bottom: usize, closure: *mut Closure, va_args: Vec<Value>) -> CallFrame {
         CallFrame {
             bottom,
             closure,
             pc: 0,
+            va_args,
         }
     }
     fn decode(&self) -> Instr {
@@ -77,40 +86,42 @@ impl Vm {
         debug: bool,
     ) -> Vm {
         let mut call_frames = Vec::<CallFrame>::new();
-        let mut closure = Closure {
+        let mut b_chunk = Box::new(prog);
+        let mut closure = Box::new(Closure {
             marked: false,
-            chunk: &prog as *const Chunk,
+            chunk: b_chunk.as_mut() as *const Chunk,
             upvalues: Vec::new(),
-        };
-        call_frames.push(CallFrame::new(0, &mut closure as *mut Closure));
-        let mut fiber = Fiber {
+            this_ref: None,
+        });
+        call_frames.push(CallFrame::new(0, closure.as_mut() as *mut Closure, Vec::new()));
+        let mut fiber = Box::new(Fiber {
             marked: false,
             call_frames: call_frames,
             stack: {
                 let mut vec = Vec::new();
-                for _ in 0..prog.num_locals {
+                for _ in 0..b_chunk.num_locals {
                     vec.push(Value::Nil);
                 }
                 vec
             },
             state: FiberState::Running,
             prev: null_mut() as *mut Fiber,
-        };
+        });
 
         Vm {
-            executing_fiber: &mut fiber as *mut Fiber,
+            executing_fiber: fiber.as_mut() as *mut Fiber,
             upvalues: Vec::new(),
             objects: Vec::new(),
             top_closure: closure,
-            top_chunk: prog,
+            top_chunk: b_chunk,
             main_fiber: fiber,
             protected: false,
-            global,
+            global: vec![global],
             string_pool,
             debug,
         }
     }
-    fn get_stack<'a>(&'a self) -> &'a mut Vec<Value> {
+    pub fn get_stack<'a>(&'a self) -> &'a mut Vec<Value> {
         unsafe { &mut (*self.executing_fiber).stack }
     }
 
@@ -120,9 +131,12 @@ impl Vm {
     pub fn run(&mut self) -> EvalResult {
         loop {
             let call_frame = unsafe { (*self.executing_fiber).call_frames.last_mut().unwrap() };
+            let closure = call_frame.closure;
             let mut stack = unsafe { &mut (*self.executing_fiber).stack };
             let instr = unsafe { (*(*call_frame.closure).chunk).bytecodes[call_frame.pc] };
             let pc = call_frame.pc;
+            // dbg!(&instr);
+            // dbg!(&stack);
             if self.debug {}
             match instr {
                 Instr::Add => {
@@ -205,6 +219,16 @@ impl Vm {
                     stack.push(Value::Bool(opr1 && opr2));
                     self.pc_add();
                 }
+                Instr::MakeRange => {
+                    let (opr1, opr2) = self.stack_get_number()?;
+                    stack.push(Value::Range(opr1, opr2));
+                    self.pc_add();
+                }
+                Instr::MakeRangeClosed => {
+                    let (opr1, opr2) = self.stack_get_number()?;
+                    stack.push(Value::Range(opr1, opr2 + 1.));
+                    self.pc_add();
+                }
                 Instr::PushNil => {
                     stack.push(Value::Nil);
                     self.pc_add();
@@ -221,9 +245,15 @@ impl Vm {
                     stack.pop();
                     self.pc_add();
                 }
+                Instr::Swap2 => {
+                    let t1 = stack.pop().unwrap();
+                    let t2 = stack.pop().unwrap();
+                    stack.push(t1);
+                    stack.push(t2);
+                    self.pc_add();
+                }
                 Instr::LoadChunk(x) => {
                     let chunk = self.get_chunk(x) as *const Chunk;
-                    //unimplemented!("for closure loading");
                     let mut upvalues = Vec::new();
 
                     for upval_decl in unsafe { &*chunk }.upvalues.iter() {
@@ -257,11 +287,13 @@ impl Vm {
                         marked: false,
                         chunk,
                         upvalues,
+                        this_ref: None,
                     };
                     let mut boxed_closure = Box::new(closure);
                     let pointer = boxed_closure.as_mut() as *mut Closure;
                     self.objects.push(boxed_closure);
                     stack.push(Value::Closure(pointer));
+                    self.pc_add();
                 }
                 Instr::Load(x) => {
                     let v = self.get_constant(x);
@@ -273,8 +305,19 @@ impl Vm {
                     let call_frame = call_frame;
                     let idx = unsafe { (*(*call_frame.closure).chunk).constants[x].clone() };
                     if let Value::String(idx) = idx {
-                        let val = self.global[&idx].clone();
+                        let val = self.global.last().unwrap()[&idx].clone();
                         stack.push(val);
+                        self.pc_add();
+                    } else {
+                        unreachable!();
+                    }
+                }
+                Instr::SetGlobal(x) => {
+                    let call_frame = call_frame;
+                    let idx = unsafe { (*(*call_frame.closure).chunk).constants[x].clone() };
+                    let v = stack.pop().unwrap();
+                    if let Value::String(idx) = idx {
+                        self.global.last_mut().unwrap().insert(idx, v);
                         self.pc_add();
                     } else {
                         unreachable!();
@@ -290,7 +333,7 @@ impl Vm {
                 Instr::SetLocal(x) => {
                     let callframe = call_frame;
                     let bottom = callframe.bottom;
-                    let v = stack.last().unwrap().clone();
+                    let v = stack.pop().unwrap();
                     stack[x + bottom] = v;
                     self.pc_add();
                 }
@@ -300,7 +343,7 @@ impl Vm {
                     self.pc_add();
                 }
                 Instr::SetUpValue(x) => {
-                    let opr = stack.last().unwrap().clone();
+                    let opr = stack.pop().unwrap();
                     self.set_upvalue(x, opr);
                     self.pc_add();
                 }
@@ -329,7 +372,11 @@ impl Vm {
                                 }
                                 let i = i as usize;
                                 let arr = unsafe { &mut *p_array };
-                                arr.array.get(i).unwrap_or(&Value::Nil).clone()
+                                if i >= arr.array.len() {
+                                    return Err(EvalError::IndexOutOfBound(self.eval_err_str("index >= length of array")));
+                                } else {
+                                    arr.array.get(i).unwrap().clone()
+                                }
                             } else {
                                 return Err(EvalError::TypeError(
                                     self.eval_err_str("Array can only be indexed by Number"),
@@ -337,9 +384,15 @@ impl Vm {
                             }
                         }
                         Value::Dictionary(p_dict) => {
-                            if let Value::String(i) = idx {
-                                let dict = unsafe { &mut *p_dict };
-                                dict.dict.get(&i).unwrap_or(&Value::Nil).clone()
+                            if let Value::String(s) = idx {
+                                let m = unsafe {
+                                    &mut *p_dict
+                                };
+                                if let Some(v) = m.dict.get(&s) {
+                                    v.clone()
+                                } else {
+                                    return Err(EvalError::KeyError(self.eval_err_str("unknown key to module")));
+                                }
                             } else {
                                 return Err(EvalError::TypeError(
                                     self.eval_err_str("Dict can only be indexed by String"),
@@ -353,6 +406,54 @@ impl Vm {
                             } else {
                                 return Err(EvalError::TypeError(
                                     self.eval_err_str("Error can only be indexed by String"),
+                                ));
+                            }
+                        }
+                        Value::Instance(p_instance) => {
+                            if let Value::String(i) = idx {
+                                let instance = unsafe { &mut *p_instance };
+                                if let Some(v) = instance.fields.get(&i) {
+                                    v.clone()
+                                } else {
+                                    if let Some(method) =
+                                        unsafe { (*instance.klass).methods.get(&i) }
+                                    {
+                                        if let Value::Closure(method) = method {
+                                            let mut binded_closure = unsafe { (**method).clone() };
+                                            binded_closure.this_ref = Some(p_instance);
+                                            let mut b_binded_closure = Box::new(binded_closure);
+                                            let p_binded_closure =
+                                                b_binded_closure.as_mut() as *mut Closure;
+                                            self.objects.push(b_binded_closure);
+                                            Value::Closure(p_binded_closure)
+                                        } else {
+                                            unreachable!()
+                                        }
+                                    } else {
+                                        return Err(EvalError::VariableNotFound(
+                                            self.eval_err_str("method not found"),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("Instance can only be indexed by String"),
+                                ));
+                            }
+                        }
+                        Value::Module(p_module) => {
+                            if let Value::String(s) = idx {
+                                let m = unsafe {
+                                    &mut *p_module
+                                };
+                                if let Some(v) = m.dict.get(&s) {
+                                    v.clone()
+                                } else {
+                                    return Err(EvalError::KeyError(self.eval_err_str("unknown key to module")));
+                                }
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("Module can only be indexed by String"),
                                 ));
                             }
                         }
@@ -420,6 +521,24 @@ impl Vm {
                                 ));
                             }
                         }
+                        Value::Instance(p_instance) => {
+                            if let Value::String(i) = idx {
+                                let instance = unsafe { &mut *p_instance };
+                                // if let Some(v) = instance.fields.get_mut(&i) {
+                                //     *v = val;
+                                // } else {
+                                //     return Err(EvalError::VariableNotFound(
+                                //         self.eval_err_str("field in instance not found"),
+                                //     ));
+                                // }
+                                // Maybe only allow bind value in constructor?
+                                instance.fields.insert(i.clone(), val);
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("Instance can only be indexed by String"),
+                                ));
+                            }
+                        }
                         v => {
                             return Err(EvalError::TypeError(self.eval_err_str(
                                 format!("{:?} cannot be indexed and assigned to", v).as_ref(),
@@ -442,25 +561,100 @@ impl Vm {
                         } else {
                             self.pc_add();
                         }
-                        stack.pop();
                     } else {
-                        return Err(EvalError::TypeError(
-                            self.eval_err_str("condition expression must be Bool"),
-                        ));
+                        if let Value::Nil = stack.last().unwrap() {
+                            let last_pc = call_frame.pc as i32;
+                            let pc = (last_pc + x) as usize;
+                            call_frame.pc = pc;
+                        } else {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("condition expression must be Bool"),
+                            ));
+                        }
+                    }
+                }
+                Instr::JumpIfTrue(x) => {
+                    if let Value::Bool(b) = stack.last().unwrap() {
+                        if *b {
+                            let last_pc = call_frame.pc as i32;
+                            let pc = (last_pc + x) as usize;
+                            call_frame.pc = pc;
+                        } else {
+                            self.pc_add();
+                        }
+                    } else {
+                        if let Value::Nil = stack.last().unwrap() {
+                            self.pc_add();
+                        } else {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("condition expression must be Bool"),
+                            ));
+                        }
+                    }
+                }
+
+                Instr::Iterator => {
+                    let iterator = match stack.pop().unwrap() {
+                        Value::Range(l, r) => Value::Range(l, r),
+                        Value::String(istring) => todo!(),
+                        Value::Array(_) => todo!(),
+                        Value::Dictionary(_) => todo!(),
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("not subscriptable"),
+                            ));
+                        }
+                    };
+                    stack.push(iterator);
+                    self.pc_add();
+                }
+
+                Instr::Next => {
+                    if let Value::Range(l, r) = stack.last_mut().unwrap() {
+                        let v = if *l - *r < f64::EPSILON {
+                            Value::Nil
+                        } else if l < r {
+                            *l += 1.;
+                            Value::Number(*l - 1.)
+                        } else if l > r {
+                            *l -= 1.;
+                            Value::Number(*l + 1.)
+                        } else {
+                            unreachable!()
+                        };
+                        stack.push(v);
+                        self.pc_add();
+                    } else {
+                        todo!()
                     }
                 }
                 Instr::Call(x) => {
                     let val = &stack[stack.len() - x - 1];
                     if let Value::Closure(p_closure) = val {
-                        let call_frame = CallFrame::new(stack.len() - x, *p_closure);
+                        let mut packed_va_list = Vec::new();
                         let chunk = unsafe { &*((**p_closure).chunk) };
                         if chunk.parameter_num != x {
-                            return Err(EvalError::CallError(
-                                self.eval_err_str(
-                                    format!("wrong number of argument {x}/{}", chunk.parameter_num)
+                            if chunk.parameter_num < x && chunk.is_va {
+                                for idx in (stack.len() - x + chunk.parameter_num)..stack.len() {
+                                    packed_va_list.push(stack[idx].clone());
+                                }
+                            } else {
+                                return Err(EvalError::CallError(
+                                    self.eval_err_str(
+                                        format!(
+                                            "wrong number of argument {x}/{}",
+                                            chunk.parameter_num
+                                        )
                                         .as_ref(),
-                                ),
-                            ));
+                                    ),
+                                ));
+                            }
+                        }
+                        let call_frame =
+                            CallFrame::new(stack.len() - x, *p_closure, packed_va_list);
+                        // va_list arg should be pop
+                        for _ in 0..x - chunk.parameter_num {
+                            stack.pop();
                         }
                         self.pc_add();
                         self.protected = false;
@@ -468,12 +662,46 @@ impl Vm {
                         unsafe {
                             (*self.executing_fiber).call_frames.push(call_frame);
                         }
+                    } else if let Value::Klass(klass) = val {
+                        let class_idx = stack.len() - x - 1;
+
+                        let mut b_instace = Box::new(Instance {
+                            marked: false,
+                            klass: *klass,
+                            fields: HashMap::new(),
+                        });
+                        let p_instance = b_instace.as_mut() as *mut Instance;
+                        self.objects.push(b_instace);
+                        let idx = self.string_pool.creat_istring("__init__");
+                        if let Some(method) = unsafe { (**klass).methods.get(&idx) } {
+                            if let Value::Closure(method) = method {
+                                let mut binded_closure = unsafe { (**method).clone() };
+                                binded_closure.this_ref = Some(p_instance);
+                                let mut b_binded_closure = Box::new(binded_closure);
+                                let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
+                                self.objects.push(b_binded_closure);
+                                let init_method = Value::Closure(p_binded_closure);
+                                stack[class_idx] = init_method;
+                                self.call_routine(x)?;
+                                // constructor evaluate to Nil
+                            } else {
+                                unreachable!()
+                            }
+                        } else {
+                            // no __init__() definded
+                            for _ in 0..x{
+                                stack.pop();
+                            }
+                            stack.pop();
+                            stack.push(Value::Instance(p_instance));
+                            self.pc_add();
+                        }
                     } else if let Value::NativeFunction(f) = val {
                         let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(*f) };
                         //println!("{:?}", native::sloth_print as *mut u8);
-                        let v = f(&mut stack, x, false);
-                        stack.pop();
-                        stack.push(v);
+
+                        f(self, x, false);
+
                         self.pc_add();
                     } else {
                         return Err(EvalError::CallError(
@@ -481,37 +709,7 @@ impl Vm {
                         ));
                     }
                 }
-                Instr::TryCall(x) => {
-                    let val = &stack[stack.len() - x - 1];
-                    if let Value::Closure(p_closure) = val {
-                        let call_frame = CallFrame::new(stack.len() - x, *p_closure);
-                        let chunk = unsafe { &*((**p_closure).chunk) };
-                        if chunk.parameter_num != x {
-                            return Err(EvalError::CallError(
-                                self.eval_err_str(
-                                    format!("wrong number of argument {x}/{}", chunk.parameter_num)
-                                        .as_ref(),
-                                ),
-                            ));
-                        }
-                        self.pc_add();
-                        self.protected = true;
-                        self.reserve_local(chunk.num_locals - chunk.parameter_num);
-                        unsafe {
-                            (*self.executing_fiber).call_frames.push(call_frame);
-                        }
-                    } else if let Value::NativeFunction(f) = val {
-                        let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(*f) };
-                        let v = f(&mut stack, x, true);
-                        stack.pop();
-                        stack.push(v);
-                        self.pc_add();
-                    } else {
-                        return Err(EvalError::CallError(
-                            self.eval_err_str("calling object which is not Callable"),
-                        ));
-                    }
-                }
+
                 Instr::Except => {
                     let callframe = unsafe { (*self.executing_fiber).call_frames.pop().unwrap() };
                     let chunk = unsafe { &*(*callframe.closure).chunk };
@@ -594,7 +792,7 @@ impl Vm {
                             stack.pop();
                         }
                         stack.pop(); //pop closure
-                        stack.push(Value::Nil);
+                        stack.push(Value::Nil); // functions always return exactly ONE value
                     } else {
                         let val = stack.pop().unwrap(); // closure ret_vall <- get it
                         for _ in callframe.bottom..stack.len() {
@@ -607,12 +805,161 @@ impl Vm {
                         return Ok(());
                     }
                 }
+                Instr::GetSuperMethod => {
+                    let idx = stack.pop().unwrap();
+                    let clct = stack.pop().unwrap();
+                    if let Value::Instance(p_instance) = clct {
+                        if let Value::String(i) = idx {
+                            let instance = unsafe { &mut *p_instance };
+                            let mut super_class = unsafe { (*instance.klass).super_klass };
+                            let mut ok = false;
+                            while super_class != ptr::null_mut() {
+                                if let Some(method) = unsafe { (*super_class).methods.get(&i) } {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        stack.push(Value::Closure(p_binded_closure));
+                                        self.pc_add();
+                                        ok = true;
+                                        break;
+                                    } else {
+                                        super_class = unsafe { (*super_class).super_klass };
+                                    }
+                                }
+                            }
+                            if !ok {
+                                return Err(EvalError::VariableNotFound(
+                                    self.eval_err_str("method not found"),
+                                ));
+                            }
+                        } else {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("Instance can only be indexed by String"),
+                            ));
+                        }
+                    } else {
+                        unreachable!()
+                    }
+                }
+                Instr::InitClass => {
+                    let mut b_class = Box::new(Klass {
+                        marked: false,
+                        super_klass: null_mut(),
+                        methods: HashMap::new(),
+                    });
+                    let p_class = b_class.as_mut() as *mut Klass;
+                    self.objects.push(b_class);
+                    stack.push(Value::Klass(p_class));
+                    self.pc_add();
+                }
+                Instr::ClassExtend => {
+                    let super_klass = stack.pop().unwrap();
+                    let klass = stack.pop().unwrap();
+                    if let Value::Klass(klass) = klass {
+                        if let Value::Klass(super_klass) = super_klass {
+                            unsafe {
+                                (*klass).super_klass = super_klass;
+                                // copy down methods
+                                for (name, closure) in &(*super_klass).methods {
+                                    (*klass).methods.insert(name.clone(), closure.clone());
+                                }
+                            }
+                            stack.push(Value::Klass(klass));
+                            self.pc_add();
+                        } else {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("Class can only extend Class"),
+                            ));
+                        }
+                    } else {
+                        unreachable!()
+                    }
+                }
+                Instr::AddMethod => {
+                    let method = stack.pop().unwrap();
+                    let name = stack.pop().unwrap();
+                    let klass = stack.pop().unwrap();
+                    if let Value::Klass(klass) = klass {
+                        if let Value::String(name) = name {
+                            if let Value::Closure(method) = method {
+                                unsafe {
+                                    (*klass).methods.insert(name, Value::Closure(method));
+                                }
+                            } else {
+                                unreachable!()
+                            }
+                            stack.push(Value::Klass(klass));
+                            self.pc_add();
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        unreachable!()
+                    }
+                }
+                Instr::GetThis => {
+                    let t = unsafe { (*closure).this_ref.unwrap() };
+                    stack.push(Value::Instance(t));
+                    self.pc_add();
+                }
+                Instr::Nop => {
+                    self.pc_add();
+                }
                 i => {
                     return Err(EvalError::Error(
                         self.eval_err_str(format!("unknown instruction {i:?}").as_ref()),
                     ))
                 }
             }
+        }
+    }
+
+    fn call_routine(&mut self, arg_cnt: usize) -> Result<(), EvalError> {
+        let stack = self.get_stack();
+        let x = arg_cnt;
+        let val = &stack[stack.len() - x - 1];
+        if let Value::Closure(p_closure) = val {
+            let mut packed_va_list = Vec::new();
+            let chunk = unsafe { &*((**p_closure).chunk) };
+            if chunk.parameter_num != x {
+                if chunk.parameter_num < x && chunk.is_va {
+                    for idx in (stack.len() - x + chunk.parameter_num)..stack.len() {
+                        packed_va_list.push(stack[idx].clone());
+                    }
+                } else {
+                    return Err(EvalError::CallError(self.eval_err_str(
+                        format!("wrong number of argument {x}/{}", chunk.parameter_num).as_ref(),
+                    )));
+                }
+            }
+            let call_frame = CallFrame::new(stack.len() - x, *p_closure, packed_va_list);
+            // va_list arg should be pop
+            for _ in 0..x - chunk.parameter_num {
+                stack.pop();
+            }
+            self.pc_add();
+            self.protected = false;
+            self.reserve_local(chunk.num_locals - chunk.parameter_num);
+            unsafe {
+                (*self.executing_fiber).call_frames.push(call_frame);
+            }
+            return Ok(());
+        } else if let Value::NativeFunction(f) = val {
+            let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(*f) };
+            //println!("{:?}", native::sloth_print as *mut u8);
+            stack.pop();
+            f(self, x, false);
+
+            self.pc_add();
+            return Ok(());
+        } else {
+            return Err(EvalError::CallError(
+                self.eval_err_str("calling object which is not Callable"),
+            ));
         }
     }
     fn new_upvalue_object(&mut self, idx: usize) -> *mut UpValueObject {
@@ -758,30 +1105,71 @@ impl Vm {
         if self.objects.len() < 128 {
             return Ok(());
         }
+        macro_rules! mark_val {
+            ($v:expr) => {
+                match $v {
+                    Value::Array(p_arr) => {
+                        unsafe {
+                            let arr = &mut **p_arr;
+                            arr.mark();
+                            arr.mark_children();
+                        };
+                    }
+                    Value::Dictionary(p_dict) => {
+                        unsafe {
+                            let dict = &mut **p_dict;
+                            dict.mark();
+                            dict.mark_children();
+                        };
+                    }
+                    Value::Closure(p_closure) => {
+                        unsafe {
+                            let closure = &mut **p_closure;
+                            closure.mark();
+                            closure.mark_children();
+                        };
+                    }
+                    Value::Fiber(p_fiber) => {
+                        unsafe {
+                            let fiber = &mut **p_fiber;
+                            fiber.mark();
+                            fiber.mark_children();
+                        }
+                    }
+                    Value::Klass(p) => {
+                        unsafe {
+                            let p = &mut **p;
+                            p.mark();
+                            p.mark_children();
+                        }
+                    }
+                    Value::Instance(p) => {
+                        unsafe {
+                            let p = &mut **p;
+                            p.mark();
+                            p.mark_children();
+                        }
+                    }
+                    Value::Module(p) => {
+                        unsafe {
+                            let p = &mut **p;
+                            p.mark();
+                            p.mark_children();
+                        }
+                    }
+                    
+                    
+    
+                    _ => {}
+                }
+            };
+        }
         for val in self.main_fiber.stack.iter_mut() {
-            match val {
-                Value::Array(p_arr) => {
-                    unsafe {
-                        let arr = &mut **p_arr;
-                        arr.mark();
-                        arr.mark_children();
-                    };
-                }
-                Value::Dictionary(p_dict) => {
-                    unsafe {
-                        let dict = &mut **p_dict;
-                        dict.mark();
-                        dict.mark_children();
-                    };
-                }
-                Value::Closure(p_closure) => {
-                    unsafe {
-                        let closure = &mut **p_closure;
-                        closure.mark();
-                        closure.mark_children();
-                    };
-                }
-                _ => {}
+            mark_val!(val);
+        }
+        for g in self.global.iter_mut() {
+            for (_s,v) in g.iter_mut() {
+                mark_val!(v);
             }
         }
         let mut new_obj_vec: Vec<Box<dyn GCObject>> = self
@@ -795,20 +1183,39 @@ impl Vm {
     }
     /// Value passed to this function should not
     /// be GC-managed, or memory would leak.
-    pub fn load_native_module(&mut self, module_name: &str, kv: Vec<(String, Value)>) {
-        let module: HashMap<IString, Value> = HashMap::from_iter(
-            kv.iter()
-                .map(|(k, v)| (self.string_pool.creat_istring(&k), v.clone())),
-        );
-        let dict = Dict {
-            marked: false,
-            dict: module,
-        };
-        let mut managed_module = Box::new(dict);
-        let p_module = managed_module.as_mut() as *mut Dict;
-        self.objects.push(managed_module);
-        let module_value = Value::Module(p_module);
-        self.global
-            .insert(self.string_pool.creat_istring(module_name), module_value);
+    pub fn load_native_module(&mut self, module_name: Option<&str>, kv: Vec<(String, Value)>) {
+        if let Some(module_name) = module_name {
+            let module: HashMap<IString, Value> = HashMap::from_iter(
+                kv.iter()
+                    .map(|(k, v)| (self.string_pool.creat_istring(&k), v.clone())),
+            );
+            let dict = Dict {
+                marked: false,
+                dict: module,
+            };
+            let mut managed_module = Box::new(dict);
+            let p_module = managed_module.as_mut() as *mut Dict;
+            self.objects.push(managed_module);
+            let module_value = Value::Module(p_module);
+
+            self.global
+                .last_mut()
+                .unwrap()
+                .insert(self.string_pool.creat_istring(module_name), module_value);
+        } else {
+            // insert into current Global namespace
+            for (k, v) in kv.iter() {
+                self.global
+                    .last_mut()
+                    .unwrap()
+                    .insert(self.string_pool.creat_istring(&k), v.clone());
+            }
+        }
+    }
+    pub fn load_module(&mut self, module_name: Option<&str>, src: &str) {
+        
+    }
+    pub fn make_managed_string(&mut self, s: &str) -> IString {
+        self.string_pool.creat_istring(s)
     }
 }

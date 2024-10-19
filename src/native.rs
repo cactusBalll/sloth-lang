@@ -3,23 +3,15 @@ use crate::*;
 use std::collections::HashSet;
 
 
-pub fn sloth_print(stack: &mut Vec<Value>, arg_num: usize, _protected: bool) -> Value {
-    let mut visited_loc: HashSet<*mut u8> = HashSet::new();
-    for _ in 0..arg_num {
-        let val = stack.pop().unwrap_or(Value::Nil);
-        print_val(&val, &mut visited_loc);
-        println!();
-    }
-    Value::Nil
-}
-pub fn sloth_typeof(stack: &mut Vec<Value>, _arg_num: usize, _protected: bool) -> Value {
-    let val = stack.pop().unwrap_or(Value::Nil);
+
+pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
+    let val = vm.get_stack().pop().unwrap_or(Value::Nil);
     macro_rules! vstr {
         ($s:expr) => {
             Value::Nil
         };
     }
-    match val {
+    let v = match val {
         Value::Nil => vstr!("Nil"),
         Value::Bool(_) => vstr!("Bool"),
         Value::Number(_) => vstr!("Number"),
@@ -32,7 +24,30 @@ pub fn sloth_typeof(stack: &mut Vec<Value>, _arg_num: usize, _protected: bool) -
         Value::NativeFunction(_) => vstr!("NativeFunction"),
         Value::OpaqueData(_) => vstr!("OpaqueData"),
         Value::Fiber(_) => vstr!("Fiber"),
+        Value::Range(_, _) => vstr!("Range"),
+        _ => vstr!("..."),
+    };
+    vm.get_stack().push(v);
+    
+}
+
+
+
+pub fn sloth_print_val(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    let mut val_to_print = Vec::new();
+    for _ in 0..arg_num {
+        val_to_print.push(vm.get_stack().pop().unwrap());
     }
+    // pop me
+    let _ = vm.get_stack().pop();
+    val_to_print.reverse();
+    for v in val_to_print {
+        let mut vis = HashSet::new();
+        print_val(&v, &mut vis);
+        print!(" ");
+    }
+    // Functions always have ONE return Value
+    vm.get_stack().push(Value::Nil);
 }
 fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
     match val {

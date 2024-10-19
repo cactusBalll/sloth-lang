@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub enum PrattPrecedence {
     Lowest,
+    PipeOp,
+    Range,
     Or,
     And,
     Equal,
@@ -37,6 +39,8 @@ fn get_precedence(token: &Token) -> PrattPrecedence {
         Token::LSlash | Token::Percent | Token::Star => PrattPrecedence::Factor,
         Token::EEqual | Token::NotEqual => PrattPrecedence::Equal,
         Token::Le | Token::Ge | Token::LArrow | Token::RArrow => PrattPrecedence::Cmp,
+        Token::Dots | Token::DotsEq => PrattPrecedence::Range,
+        Token::PipeOp => PrattPrecedence::PipeOp,
         _ => PrattPrecedence::None,
     }
 }
@@ -45,6 +49,7 @@ enum VarLoc {
     Local(usize),
     UpValue(usize),
     Global(usize),
+    ThisRef,
     NotFound,
 }
 pub struct ParserCtx<'a> {
@@ -62,6 +67,8 @@ pub struct ParserCtx<'a> {
     exported_symbols: Vec<IString>,
     string_pool: &'a mut StringPool,
     depth: usize,
+
+    method_ctx: bool,
 }
 
 pub struct ParserResult {
@@ -72,6 +79,8 @@ pub struct ParserResult {
 struct FuncCtx {
     block_ctx_stack: Vec<BlockCtx>,
     num_locals: usize,
+    loop_ctx: bool,
+    loop_ctx_stack: Vec<LoopCtx>,
 }
 #[derive(Debug, Default)]
 struct BlockCtx {
@@ -79,7 +88,11 @@ struct BlockCtx {
     /// map[local_slot, is_captured]
     symbol_captured: Vec<bool>,
 }
-
+#[derive(Debug, Default)]
+struct LoopCtx {
+    continue_patch_point: Vec<usize>,
+    break_patch_point: Vec<usize>,
+}
 impl<'a> ParserCtx<'a> {
     pub fn new(
         scanner_result: ScannerResult,
@@ -92,12 +105,19 @@ impl<'a> ParserCtx<'a> {
             chunk: vec![Chunk::default()],
             tokens: scanner_result.tokens,
             token_cood: scanner_result.cood,
-            func_ctx_stack: vec![],
+            func_ctx_stack: vec![FuncCtx {
+                block_ctx_stack: vec![BlockCtx::default()],
+                num_locals: 0,
+                loop_ctx: false,
+                loop_ctx_stack: Vec::new(),
+            }],
             global_symbol,
             exported_symbols: Vec::new(),
             string_pool,
             //num_upvalues: vec![0],
             depth: 0,
+
+            method_ctx: false,
         }
     }
 
@@ -113,16 +133,50 @@ impl<'a> ParserCtx<'a> {
                 return Err("incomplete program".to_owned());
             }
         }
-        self.parse()
+        self.parse()?;
+        self.emit(Instr::Return);
+        Ok(())
     }
     fn parse(&mut self) -> Result<(), String> {
         loop {
             let tok = if let Some(tok) = self.peek() {
-                tok
+                dbg!(tok)
             } else {
                 return Ok(());
             };
             match tok {
+                Token::Break => {
+                    if !self.func_ctx_stack.last().unwrap().loop_ctx {
+                        return Err(self.parser_err_str("break can ONLY be used inside loops"));
+                    } else {
+                        self.advance();
+                        self.emit(Instr::Nop);
+                        self.func_ctx_stack
+                            .last_mut()
+                            .unwrap()
+                            .loop_ctx_stack
+                            .last_mut()
+                            .unwrap()
+                            .break_patch_point
+                            .push(self.chunk[self.depth].bytecodes.len());
+                    }
+                }
+                Token::Continue => {
+                    if !self.func_ctx_stack.last().unwrap().loop_ctx {
+                        return Err(self.parser_err_str("continue can ONLY be used inside loops"));
+                    } else {
+                        self.advance();
+                        self.emit(Instr::Nop);
+                        self.func_ctx_stack
+                            .last_mut()
+                            .unwrap()
+                            .loop_ctx_stack
+                            .last_mut()
+                            .unwrap()
+                            .continue_patch_point
+                            .push(self.chunk[self.depth].bytecodes.len());
+                    }
+                }
                 Token::Var => {
                     self.parse_decl()?;
                 }
@@ -135,14 +189,26 @@ impl<'a> ParserCtx<'a> {
                 Token::While => {
                     self.parse_while()?;
                 }
+                Token::For => {
+                    self.parse_for()?;
+                }
                 Token::Function => {
                     self.parse_func_decl()?;
                 }
                 Token::Return => {
                     self.parse_return()?;
                 }
-                Token::Symbol(_)
-                | Token::Array
+                Token::Symbol(_) => {
+                    self.parse_assign_or_rval_expr()?;
+                    // self.emit(Instr::Pop);
+                    self.consume(Token::Semicolon)?;
+                }
+                Token::Class => {
+                    self.parse_class_decl()?;
+                }
+
+                Token::LBracket
+                | Token::LParen
                 | Token::Dict
                 | Token::Number(_)
                 | Token::String(_)
@@ -150,7 +216,9 @@ impl<'a> ParserCtx<'a> {
                 | Token::False
                 | Token::Not
                 | Token::Nil
-                | Token::Sub => {
+                | Token::Sub
+                | Token::Super
+                | Token::This => {
                     self.parse_rval_expr(PrattPrecedence::Lowest)?;
                     self.emit(Instr::Pop);
                     self.consume(Token::Semicolon)?;
@@ -161,6 +229,125 @@ impl<'a> ParserCtx<'a> {
                 }
             }
         }
+    }
+    fn parse_class_decl(&mut self) -> Result<(), String> {
+        self.advance();
+        let class_name = if let Token::Symbol(class_name) = self.peek_not_eof()? {
+            self.add_local(&class_name)?;
+            class_name
+        } else {
+            return Err(self.parser_err_str("expect class name `Symbol`"));
+        };
+        self.advance();
+        self.emit(Instr::InitClass);
+        //:SuperClass
+        if let Token::Colon = self.peek_not_eof()? {
+            self.advance();
+            if let Token::Symbol(super_class_name) = self.peek_not_eof()? {
+                self.emit_get_symbol(&super_class_name, self.get_line())?;
+                self.emit(Instr::ClassExtend);
+            } else {
+                return Err(self.parser_err_str("expect superclass name `Symbol`"));
+            }
+            self.advance();
+        }
+        self.consume(Token::LBrace)?;
+        self.method_ctx = true;
+        while let Token::Function = self.peek_not_eof()? {
+            self.advance();
+            let method_name = if let Token::Symbol(method_name) = self.peek_not_eof()? {
+                method_name
+            } else {
+                return Err(self.parser_err_str("expect method name `Symbol`"));
+            };
+            self.advance();
+            self.load_value(Value::String(method_name.clone()));
+
+            let line = self.get_line();
+            self.open_env();
+            self.consume(Token::LParen)?;
+            let mut para_num = 0;
+            while let Token::Symbol(s) = self.peek_not_eof()? {
+                self.advance();
+                self.add_local(&s)?;
+                para_num += 1;
+                match self.consume(Token::Comma) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        if Token::RParen == self.peek_not_eof()? {
+                            //self.advance();
+                            break;
+                        } else {
+                            return Err(self.parser_err_str("expect RParen after parameter list"));
+                        }
+                    }
+                }
+            }
+            let tk = self.peek_not_eof()?;
+            if tk == Token::ThreeDots {
+                // varidic parameters
+                self.advance();
+                self.chunk[self.depth].is_va = true;
+            }
+            self.consume(Token::RParen)?;
+            self.consume(Token::LBrace)?;
+            self.parse()?;
+            if method_name.get_inner() == "__init__" {
+                // __init__() method implicitly return this
+                self.emit(Instr::GetThis);
+                self.emit(Instr::Return);
+            }
+            self.consume(Token::RBrace)?;
+            let mut chunk = self.close_env();
+            chunk.parameter_num = para_num;
+            self.chunk.last_mut().unwrap().chunks.push(chunk);
+            self.emit(Instr::LoadChunk(
+                self.chunk.last().unwrap().chunks.len() - 1,
+            ));
+            self.emit(Instr::AddMethod);
+        }
+        self.method_ctx = false;
+        self.consume(Token::RBrace)?;
+        // klass on the top of stack
+        self.emit_set_symbol(&class_name, self.get_line())?;
+        Ok(())
+    }
+    fn parse_for(&mut self) -> Result<(), String> {
+        self.advance();
+        self.consume(Token::LParen)?;
+        self.open_block();
+
+        if let Token::Symbol(iter_var) = self.peek_not_eof()? {
+            self.add_local(&iter_var)?;
+        } else {
+            return Err(self.parser_err_str("expect iterate variable `Symbol`"));
+        }
+        let iter_var_slot = self.chunk[self.depth].num_locals - 1;
+        self.consume(Token::Colon)?;
+        self.parse_rval_expr(PrattPrecedence::Lowest)?;
+        self.emit(Instr::Iterator);
+        let loop_start_point = self.chunk[self.depth].bytecodes.len();
+        self.emit(Instr::Next);
+        self.emit(Instr::JumpIfNot(0));
+        let backpatch_point = self.chunk[self.depth].bytecodes.len();
+        self.emit(Instr::SetLocal(iter_var_slot));
+        // self.emit(Instr::Pop);
+
+        self.consume(Token::LBrace)?;
+        self.parse()?;
+        self.consume(Token::RBrace)?;
+        self.emit(Instr::Jump(
+            loop_start_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
+        ));
+        self.chunk[self.depth].bytecodes[backpatch_point] = Instr::JumpIfNot(
+            backpatch_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
+        );
+        // pop Nil
+        self.emit(Instr::Pop);
+        // pop iterator
+        self.emit(Instr::Pop);
+        self.close_block();
+        Ok(())
     }
     fn parse_return(&mut self) -> Result<(), String> {
         self.consume(Token::Return)?;
@@ -194,7 +381,7 @@ impl<'a> ParserCtx<'a> {
             let tk = self.peek_not_eof()?;
             if Token::Comma == tk {
                 self.advance();
-            } else if Token::RParen == tk {
+            } else if Token::RParen == tk || Token::RBracket == tk {
                 return Ok(argument_num);
             } else {
                 return Err(self.parser_err_str("illegal argument list"));
@@ -204,6 +391,9 @@ impl<'a> ParserCtx<'a> {
     #[inline]
     fn emit_get_symbol(&mut self, symbol: &IString, line: usize) -> Result<(), String> {
         match self.resolve(symbol, self.depth) {
+            VarLoc::ThisRef => {
+                self.emit_with_line(Instr::GetThis, line);
+            }
             VarLoc::Local(x) => {
                 self.emit_with_line(Instr::GetLocal(x), line);
             }
@@ -222,6 +412,9 @@ impl<'a> ParserCtx<'a> {
     #[inline]
     fn emit_set_symbol(&mut self, symbol: &IString, line: usize) -> Result<(), String> {
         match self.resolve(symbol, self.depth) {
+            VarLoc::ThisRef => {
+                return Err(self.parser_err_str("set `this` is invalid"));
+            }
             VarLoc::Local(x) => {
                 self.emit_with_line(Instr::SetLocal(x), line);
             }
@@ -246,6 +439,7 @@ impl<'a> ParserCtx<'a> {
             return Err(self.parser_err_str("invalid function declaration."));
         }
         self.advance();
+        let line = self.get_line();
         self.add_local(&symbol)?;
         self.open_env();
         self.consume(Token::LParen)?;
@@ -266,6 +460,12 @@ impl<'a> ParserCtx<'a> {
                 }
             }
         }
+        let tk = self.peek_not_eof()?;
+        if tk == Token::ThreeDots {
+            // varidic parameters
+            self.advance();
+            self.chunk[self.depth].is_va = true;
+        }
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
         self.parse()?;
@@ -276,8 +476,8 @@ impl<'a> ParserCtx<'a> {
         self.emit(Instr::LoadChunk(
             self.chunk.last().unwrap().chunks.len() - 1,
         ));
-        self.emit(Instr::SetLocal(self.chunk[self.depth].num_locals - 1));
-        self.emit(Instr::Pop);
+        self.emit_set_symbol(&symbol, line)?;
+        // self.emit(Instr::Pop);
         Ok(())
     }
     fn parse_decl(&mut self) -> Result<(), String> {
@@ -295,8 +495,9 @@ impl<'a> ParserCtx<'a> {
                 self.advance();
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 self.add_local(&symbol)?;
-                self.emit(Instr::SetLocal(self.chunk[self.depth].num_locals - 1));
-                self.emit(Instr::Pop);
+                self.emit_set_symbol(&symbol, self.get_line())?;
+                // self.emit(Instr::Pop);
+                self.consume(Token::Semicolon)?;
                 return Ok(());
             }
         }
@@ -311,10 +512,30 @@ impl<'a> ParserCtx<'a> {
         self.parse_rval_expr(PrattPrecedence::Lowest)?;
         let patch_point = self.chunk[self.depth].bytecodes.len();
         self.emit(Instr::JumpIfNot(0)); // to be patched
+        self.emit(Instr::Pop);
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
         self.open_block();
+        self.func_ctx_stack.last_mut().unwrap().loop_ctx = true;
+        self.func_ctx_stack
+            .last_mut()
+            .unwrap()
+            .loop_ctx_stack
+            .push(LoopCtx::default());
         self.parse()?;
+        let cur_loop_ctx = self
+            .func_ctx_stack
+            .last_mut()
+            .unwrap()
+            .loop_ctx_stack
+            .pop()
+            .unwrap();
+        // patch continue points, jump to loop header
+        for continue_point in cur_loop_ctx.continue_patch_point.iter() {
+            self.chunk[self.depth].bytecodes[*continue_point] =
+                Instr::Jump(jumpback_point as i32 - *continue_point as i32);
+        }
+        self.func_ctx_stack.last_mut().unwrap().loop_ctx = false;
         self.emit(Instr::Jump(
             jumpback_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
         ));
@@ -322,6 +543,12 @@ impl<'a> ParserCtx<'a> {
         self.consume(Token::RBrace)?;
         self.chunk[self.depth].bytecodes[patch_point] =
             Instr::JumpIfNot(self.chunk[self.depth].bytecodes.len() as i32 - patch_point as i32);
+        // patch break points, jump to end of loop
+        for break_point in cur_loop_ctx.break_patch_point.iter() {
+            self.chunk[self.depth].bytecodes[*break_point] =
+                Instr::Jump(self.chunk[self.depth].bytecodes.len() as i32 - *break_point as i32);
+        }
+        self.emit(Instr::Pop);
         Ok(())
     }
     fn parse_block(&mut self) -> Result<(), String> {
@@ -340,11 +567,15 @@ impl<'a> ParserCtx<'a> {
         let patch_point = self.chunk[self.depth].bytecodes.len();
         // emit an empty slot, jump to FALSE branch but FALSE branch is now not parsed.
         self.emit(Instr::JumpIfNot(0));
+        // pop the bool value
+        self.emit(Instr::Pop);
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
         self.open_block();
         self.parse()?;
         let patch_point2 = self.chunk[self.depth].bytecodes.len();
+        // pop the bool value
+        self.emit(Instr::Pop);
         // emit an empty slot, jump to end of if statement, but we still don't know if there
         // is an else clause, Jump(0) is just nop.
         self.emit(Instr::Jump(0));
@@ -404,7 +635,6 @@ impl<'a> ParserCtx<'a> {
             .block_ctx_stack
             .pop();
     }
-    
 
     fn add_local(&mut self, symbol: &IString) -> Result<(), String> {
         if self.depth == 0 {
@@ -442,10 +672,14 @@ impl<'a> ParserCtx<'a> {
 
     fn parse_assign_or_rval_expr(&mut self) -> Result<(), String> {
         if let Token::Symbol(s) = self.peek_not_eof()? {
+            if !self.method_ctx && s.get_inner() == "this" {
+                return Err(self.parser_err_str("`this` can NOT be used outside methods"));
+            }
             match self.resolve(&s, self.depth) {
                 VarLoc::Local(x) => self.emit(Instr::GetLocal(x)),
                 VarLoc::UpValue(x) => self.emit(Instr::GetUpValue(x)),
                 VarLoc::Global(x) => self.emit(Instr::GetGlobal(x)),
+                VarLoc::ThisRef => self.emit(Instr::GetThis),
                 _ => {
                     return Err(self.parser_err_str("symbol not found"));
                 }
@@ -453,7 +687,7 @@ impl<'a> ParserCtx<'a> {
             self.advance();
             let mut is_assign = true;
             while let Some(tk) = self.peek() {
-                if tk == Token::EEqual {
+                if tk.is_assign() {
                     break;
                 } else if tk == Token::LBracket {
                     let line = self.get_line();
@@ -480,10 +714,27 @@ impl<'a> ParserCtx<'a> {
             }
             if is_assign {
                 // consume '='
+                let tk = self.peek().unwrap();
                 self.advance();
                 // change get operation to corresponging set operation
                 let last_instr = self.chunk[self.depth].bytecodes.pop().unwrap();
+
+                if tk.is_op_assign() {
+                    // for a op= b, load a to stack
+                    self.emit(last_instr.clone());
+                }
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
+                if tk.is_op_assign() {
+                    let op_instr = match tk {
+                        Token::AddAssign => Instr::Add,
+                        Token::SubAssign => Instr::Sub,
+                        Token::MulAssign => Instr::Mul,
+                        Token::DivAssign => Instr::Div,
+                        Token::ModAssign => Instr::Mod,
+                        _ => unreachable!(),
+                    };
+                    self.emit(op_instr);
+                }
                 // now value is on the top of stack
                 let modified_instr = match last_instr {
                     Instr::GetCollection => {
@@ -502,9 +753,11 @@ impl<'a> ParserCtx<'a> {
                 // already parsed a symbol
                 // no bracktrack
                 self.parse_rval_expr2(PrattPrecedence::Lowest, true)?;
+                self.emit(Instr::Pop);
             }
         } else {
             self.parse_rval_expr(PrattPrecedence::Lowest)?;
+            self.emit(Instr::Pop);
         }
         Ok(())
     }
@@ -523,15 +776,34 @@ impl<'a> ParserCtx<'a> {
         if !maybe_assign {
             match self.peek_not_eof()? {
                 Token::Symbol(s) => {
+                    if !self.method_ctx && s.get_inner() == "this" {
+                        return Err(self.parser_err_str("`this` can NOT be used outside methods"));
+                    }
                     match self.resolve(&s, self.depth) {
                         VarLoc::Local(x) => self.emit(Instr::GetLocal(x)),
                         VarLoc::UpValue(x) => self.emit(Instr::GetUpValue(x)),
                         VarLoc::Global(x) => self.emit(Instr::GetGlobal(x)),
+                        VarLoc::ThisRef => self.emit(Instr::GetThis),
                         _ => {
                             return Err(self.parser_err_str("symbol not found"));
                         }
                     }
                     self.advance();
+                }
+                Token::Super => {
+                    if !self.method_ctx {
+                        return Err(self.parser_err_str("`super` can NOT be used outside methods"));
+                    }
+                    self.advance();
+                    self.consume(Token::Dot)?;
+                    if let Token::Symbol(s) = self.peek_not_eof()? {
+                        self.emit(Instr::GetThis);
+                        self.load_value(Value::String(s));
+                        self.emit(Instr::GetSuperMethod);
+                        self.advance();
+                    } else {
+                        return Err(self.parser_err_str("expect symbol after `super.`"));
+                    }
                 }
                 Token::Number(x) => {
                     self.load_value(Value::Number(x));
@@ -553,7 +825,7 @@ impl<'a> ParserCtx<'a> {
                     self.emit(Instr::PushNil);
                 }
 
-                Token::Array => {
+                Token::LBracket => {
                     self.parse_array()?;
                 }
                 Token::Dict => {
@@ -575,6 +847,40 @@ impl<'a> ParserCtx<'a> {
                     self.advance();
                     self.parse_rval_expr(PrattPrecedence::Lowest)?;
                     self.consume(Token::RParen)?;
+                }
+                Token::Stick => {
+                    // lambda
+                    self.advance();
+                    self.open_env();
+                    let mut para_num = 0;
+                    while let Token::Symbol(s) = self.peek_not_eof()? {
+                        self.advance();
+                        self.add_local(&s)?;
+                        para_num += 1;
+                        match self.consume(Token::Comma) {
+                            Ok(()) => {}
+                            Err(_) => {
+                                if Token::RParen == self.peek_not_eof()? {
+                                    //self.advance();
+                                    break;
+                                } else {
+                                    return Err(self
+                                        .parser_err_str("expect `|` after lambda parameter list"));
+                                }
+                            }
+                        }
+                    }
+                    self.consume(Token::Stick)?;
+                    self.consume(Token::LBrace)?;
+                    self.parse()?;
+                    self.consume(Token::RBrace)?;
+                    let mut chunk = self.close_env();
+                    chunk.parameter_num = para_num;
+                    self.chunk.last_mut().unwrap().chunks.push(chunk);
+                    // evaluate to a closure
+                    self.emit(Instr::LoadChunk(
+                        self.chunk.last().unwrap().chunks.len() - 1,
+                    ));
                 }
                 _ => {
                     //println!("{:?}", c);
@@ -618,6 +924,12 @@ impl<'a> ParserCtx<'a> {
                 self.emit_with_line(Instr::GetCollection, line);
                 continue;
             }
+            let backpatch_point: usize = self.chunk[self.depth].bytecodes.len();
+            if tk == Token::And || tk == Token::Or {
+                self.emit(Instr::Nop);
+                // discard left value bool
+                self.emit(Instr::Pop);
+            }
             let nprec = get_precedence(&tk);
             if nprec != PrattPrecedence::None {
                 if get_precedence(&tk) <= prec {
@@ -638,7 +950,7 @@ impl<'a> ParserCtx<'a> {
                 Token::LSlash => {
                     self.emit_with_line(Instr::Div, line);
                 }
-                Token::Mod => {
+                Token::Percent => {
                     self.emit_with_line(Instr::Mod, line);
                 }
                 Token::Star => {
@@ -663,10 +975,27 @@ impl<'a> ParserCtx<'a> {
                     self.emit_with_line(Instr::Ne, line);
                 }
                 Token::And => {
-                    self.emit_with_line(Instr::And, line);
+                    let pos = self.chunk[self.depth].bytecodes.len();
+                    self.chunk[self.depth].bytecodes[backpatch_point] =
+                        Instr::JumpIfNot((pos - backpatch_point) as i32);
+                    self.chunk[self.depth].lines[backpatch_point] = line;
                 }
                 Token::Or => {
-                    self.emit_with_line(Instr::Or, line);
+                    let pos = self.chunk[self.depth].bytecodes.len();
+                    self.chunk[self.depth].bytecodes[backpatch_point] =
+                        Instr::JumpIfTrue((pos - backpatch_point) as i32);
+                    self.chunk[self.depth].lines[backpatch_point] = line;
+                }
+                Token::Dots => {
+                    self.emit_with_line(Instr::MakeRange, line);
+                }
+                Token::DotsEq => {
+                    self.emit_with_line(Instr::MakeRangeClosed, line);
+                }
+                Token::PipeOp => {
+                    // `para |> functor` => `functor(para)`
+                    self.emit_with_line(Instr::Swap2, line);
+                    self.emit_with_line(Instr::Call(1), line);
                 }
                 _ => {}
             }
@@ -674,12 +1003,11 @@ impl<'a> ParserCtx<'a> {
         Ok(())
     }
     fn parse_array(&mut self) -> Result<(), String> {
-        self.consume(Token::Array)?;
+        self.consume(Token::LBracket)?;
         let line = self.get_line();
-        self.consume(Token::LParen)?;
         let arg_num = self.parse_argument()?;
         self.emit_with_line(Instr::InitArray(arg_num), line);
-        self.consume(Token::RParen)?;
+        self.consume(Token::RBracket)?;
         Ok(())
     }
     fn parse_dict(&mut self) -> Result<(), String> {
@@ -720,6 +1048,7 @@ impl<'a> ParserCtx<'a> {
     fn consume(&mut self, token: Token) -> Result<(), String> {
         if let Some(look_tok) = self.peek() {
             if look_tok == token {
+                self.advance();
                 return Ok(());
             } else {
                 return Err(format!(
@@ -786,6 +1115,31 @@ impl<'a> ParserCtx<'a> {
         self.chunk[self.depth].constants.push(c);
         return self.chunk[self.depth].constants.len() - 1;
     }
+    fn push_unique_number(&mut self, v: f64) -> usize {
+        for (i, c) in self.chunk[self.depth].constants.iter().enumerate() {
+            if let Value::Number(v1) = c {
+                if (v - v1).abs() < f64::EPSILON {
+                    return i;
+                }
+            }
+        }
+        self.chunk[self.depth].constants.push(Value::Number(v));
+        return self.chunk[self.depth].constants.len() - 1;
+    }
+
+    fn push_unique_string(&mut self, s: &IString) -> usize {
+        for (i, c) in self.chunk[self.depth].constants.iter().enumerate() {
+            if let Value::String(s1) = c {
+                if s == s1 {
+                    return i;
+                }
+            }
+        }
+        self.chunk[self.depth]
+            .constants
+            .push(Value::String(s.clone()));
+        return self.chunk[self.depth].constants.len() - 1;
+    }
     #[inline]
     fn load_value(&mut self, v: Value) {
         if let Some(x) = self.chunk[self.depth]
@@ -801,9 +1155,15 @@ impl<'a> ParserCtx<'a> {
     }
 
     fn resolve(&mut self, symbol: &IString, depth: usize) -> VarLoc {
+        if dbg!(symbol.get_inner()) == "this" {
+            if !self.method_ctx {
+                return VarLoc::NotFound;
+            }
+            return VarLoc::ThisRef;
+        }
         if depth == 0 {
             // stacktop = GLOBAL[constant[idx]]
-            let idx = self.push_constant(Value::String(symbol.clone()));
+            let idx = self.push_unique_string(symbol);
             return VarLoc::Global(idx);
         }
         // from innermost Block to outermost Block of current Function
@@ -839,7 +1199,7 @@ impl<'a> ParserCtx<'a> {
                 // Global variable
                 return VarLoc::Global(x);
             }
-            VarLoc::NotFound => {
+            _ => {
                 return VarLoc::NotFound;
             }
         }
