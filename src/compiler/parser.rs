@@ -307,9 +307,9 @@ impl<'a> ParserCtx<'a> {
             self.emit(Instr::AddMethod);
         }
         self.method_ctx = false;
-        self.consume(Token::RBrace)?;
         // klass on the top of stack
         self.emit_set_symbol(&class_name, self.get_line())?;
+        self.consume(Token::RBrace)?;
         Ok(())
     }
     fn parse_for(&mut self) -> Result<(), String> {
@@ -714,27 +714,10 @@ impl<'a> ParserCtx<'a> {
             }
             if is_assign {
                 // consume '='
-                let tk = self.peek().unwrap();
                 self.advance();
                 // change get operation to corresponging set operation
                 let last_instr = self.chunk[self.depth].bytecodes.pop().unwrap();
-
-                if tk.is_op_assign() {
-                    // for a op= b, load a to stack
-                    self.emit(last_instr.clone());
-                }
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
-                if tk.is_op_assign() {
-                    let op_instr = match tk {
-                        Token::AddAssign => Instr::Add,
-                        Token::SubAssign => Instr::Sub,
-                        Token::MulAssign => Instr::Mul,
-                        Token::DivAssign => Instr::Div,
-                        Token::ModAssign => Instr::Mod,
-                        _ => unreachable!(),
-                    };
-                    self.emit(op_instr);
-                }
                 // now value is on the top of stack
                 let modified_instr = match last_instr {
                     Instr::GetCollection => {
@@ -1207,7 +1190,12 @@ impl<'a> ParserCtx<'a> {
 
     #[inline]
     fn get_line(&self) -> usize {
-        self.token_cood[self.ptr].0
+        if self.ptr >= self.token_cood.len() {
+            self.token_cood.last().unwrap().0
+        } else {
+            self.token_cood[self.ptr].0
+        }
+        
     }
 }
 #[cfg(test)]

@@ -79,7 +79,7 @@ pub enum Token {
 impl Token {
     pub fn is_assign(&self) -> bool {
         *self == Token::Equal
-            || self.is_op_assign()
+            // || self.is_op_assign()
     }
 
     pub fn is_op_assign(&self) -> bool {

@@ -182,41 +182,6 @@ impl<'a> ScannerCtx<'a> {
                             self.advance()?;
                             continue;
                         }
-                        if c == '+' && ahead == '=' {
-                            self.tokens.push(Token::AddAssign);
-                            self.record_pos();
-                            self.advance()?;
-                            self.advance()?;
-                            continue;
-                        }
-                        if c == '-' && ahead == '=' {
-                            self.tokens.push(Token::SubAssign);
-                            self.record_pos();
-                            self.advance()?;
-                            self.advance()?;
-                            continue;
-                        }
-                        if c == '*' && ahead == '=' {
-                            self.tokens.push(Token::MulAssign);
-                            self.record_pos();
-                            self.advance()?;
-                            self.advance()?;
-                            continue;
-                        }
-                        if c == '/' && ahead == '=' {
-                            self.tokens.push(Token::DivAssign);
-                            self.record_pos();
-                            self.advance()?;
-                            self.advance()?;
-                            continue;
-                        }
-                        if c == '%' && ahead == '=' {
-                            self.tokens.push(Token::ModAssign);
-                            self.record_pos();
-                            self.advance()?;
-                            self.advance()?;
-                            continue;
-                        }
                         if c == '.' && ahead == '.' {
                             self.tokens.push(Token::Dots);
                             self.record_pos();

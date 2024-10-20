@@ -4,6 +4,7 @@ use crate::*;
 use std::{
     collections::btree_map::Range,
     fmt::Display,
+    path::PathBuf,
     ptr::{self, null_mut},
 };
 #[derive(Debug)]
@@ -28,6 +29,12 @@ impl From<EvalError> for String {
         err.to_string()
     }
 }
+
+impl From<String> for EvalError {
+    fn from(value: String) -> Self {
+        EvalError::Error(value)
+    }
+}
 type EvalResult = Result<(), EvalError>;
 
 pub struct Vm {
@@ -42,8 +49,15 @@ pub struct Vm {
     /// should load other modules in seperated global namespace
     global: Vec<HashMap<IString, Value>>,
 
+    /// modules other than ther main module
+    loaded_chunk: Vec<Box<Chunk>>,
+
     string_pool: StringPool,
     debug: bool,
+
+    pub interpreter_cwd: PathBuf,
+    /// if fiber changed, pc should not be added
+    pub fiber_changed: bool,
 }
 
 /// every fiber have its own stack
@@ -84,6 +98,7 @@ impl Vm {
         global: HashMap<IString, Value>,
         string_pool: StringPool,
         debug: bool,
+        interpreter_cwd: PathBuf,
     ) -> Vm {
         let mut call_frames = Vec::<CallFrame>::new();
         let mut b_chunk = Box::new(prog);
@@ -93,7 +108,11 @@ impl Vm {
             upvalues: Vec::new(),
             this_ref: None,
         });
-        call_frames.push(CallFrame::new(0, closure.as_mut() as *mut Closure, Vec::new()));
+        call_frames.push(CallFrame::new(
+            0,
+            closure.as_mut() as *mut Closure,
+            Vec::new(),
+        ));
         let mut fiber = Box::new(Fiber {
             marked: false,
             call_frames: call_frames,
@@ -117,8 +136,11 @@ impl Vm {
             main_fiber: fiber,
             protected: false,
             global: vec![global],
+            loaded_chunk: Vec::new(),
             string_pool,
             debug,
+            interpreter_cwd,
+            fiber_changed: false,
         }
     }
     pub fn get_stack<'a>(&'a self) -> &'a mut Vec<Value> {
@@ -137,6 +159,8 @@ impl Vm {
             let pc = call_frame.pc;
             // dbg!(&instr);
             // dbg!(&stack);
+            // dbg!(self.global.last().unwrap());
+            
             if self.debug {}
             match instr {
                 Instr::Add => {
@@ -283,11 +307,14 @@ impl Vm {
                             }
                         }
                     }
+                    // copy current this_ref to loaded closure
+                    // for cases when lambda or functions are defined inside methods.
+                    let cur_this_ref = unsafe { (*closure).this_ref.clone() };
                     let closure = Closure {
                         marked: false,
                         chunk,
                         upvalues,
-                        this_ref: None,
+                        this_ref: cur_this_ref,
                     };
                     let mut boxed_closure = Box::new(closure);
                     let pointer = boxed_closure.as_mut() as *mut Closure;
@@ -373,7 +400,9 @@ impl Vm {
                                 let i = i as usize;
                                 let arr = unsafe { &mut *p_array };
                                 if i >= arr.array.len() {
-                                    return Err(EvalError::IndexOutOfBound(self.eval_err_str("index >= length of array")));
+                                    return Err(EvalError::IndexOutOfBound(
+                                        self.eval_err_str("index >= length of array"),
+                                    ));
                                 } else {
                                     arr.array.get(i).unwrap().clone()
                                 }
@@ -385,13 +414,13 @@ impl Vm {
                         }
                         Value::Dictionary(p_dict) => {
                             if let Value::String(s) = idx {
-                                let m = unsafe {
-                                    &mut *p_dict
-                                };
+                                let m = unsafe { &mut *p_dict };
                                 if let Some(v) = m.dict.get(&s) {
                                     v.clone()
                                 } else {
-                                    return Err(EvalError::KeyError(self.eval_err_str("unknown key to module")));
+                                    return Err(EvalError::KeyError(
+                                        self.eval_err_str("unknown key to module"),
+                                    ));
                                 }
                             } else {
                                 return Err(EvalError::TypeError(
@@ -443,13 +472,13 @@ impl Vm {
                         }
                         Value::Module(p_module) => {
                             if let Value::String(s) = idx {
-                                let m = unsafe {
-                                    &mut *p_module
-                                };
+                                let m = unsafe { &mut *p_module };
                                 if let Some(v) = m.dict.get(&s) {
                                     v.clone()
                                 } else {
-                                    return Err(EvalError::KeyError(self.eval_err_str("unknown key to module")));
+                                    return Err(EvalError::KeyError(
+                                        self.eval_err_str("unknown key to module"),
+                                    ));
                                 }
                             } else {
                                 return Err(EvalError::TypeError(
@@ -689,7 +718,7 @@ impl Vm {
                             }
                         } else {
                             // no __init__() definded
-                            for _ in 0..x{
+                            for _ in 0..x {
                                 stack.pop();
                             }
                             stack.pop();
@@ -701,8 +730,11 @@ impl Vm {
                         //println!("{:?}", native::sloth_print as *mut u8);
 
                         f(self, x, false);
-
-                        self.pc_add();
+                        if self.fiber_changed {
+                            self.fiber_changed = false;
+                        } else {
+                            self.pc_add();
+                        }
                     } else {
                         return Err(EvalError::CallError(
                             self.eval_err_str("calling object which is not Callable"),
@@ -801,9 +833,31 @@ impl Vm {
                         stack.pop(); // pop closure
                         stack.push(val); // push return value
                     }
-                    if unsafe { (*self.executing_fiber).call_frames.is_empty() } {
-                        return Ok(());
+                    unsafe {
+                        if (*self.executing_fiber).call_frames.is_empty() {
+                            let ret_from = self.executing_fiber;
+                            let prev = (*self.executing_fiber).prev;
+                            if prev != null_mut() {
+                                // back to prev fiber
+                                self.executing_fiber = prev;
+                                // the instruction lead to fiber transfering should be skipped
+                                self.pc_add();
+                                if (*ret_from).state == FiberState::Loader {
+                                    let module_namespace = self.global.pop().unwrap();
+                                    let mut b_module_namespace_dict = Box::new(Dict{
+                                        marked: false,
+                                        dict: module_namespace,
+                                    });
+                                    let p_module_namespace_dict = b_module_namespace_dict.as_mut() as *mut Dict;
+                                    self.objects.push(b_module_namespace_dict);
+                                    self.get_stack().push(Value::Dictionary(p_module_namespace_dict));
+                                }
+                            } else {
+                                return Ok(());
+                            }
+                        }
                     }
+                    
                 }
                 Instr::GetSuperMethod => {
                     let idx = stack.pop().unwrap();
@@ -953,8 +1007,11 @@ impl Vm {
             //println!("{:?}", native::sloth_print as *mut u8);
             stack.pop();
             f(self, x, false);
-
-            self.pc_add();
+            if self.fiber_changed {
+                self.fiber_changed = false;
+            } else {
+                self.pc_add();
+            }
             return Ok(());
         } else {
             return Err(EvalError::CallError(
@@ -1129,37 +1186,27 @@ impl Vm {
                             closure.mark_children();
                         };
                     }
-                    Value::Fiber(p_fiber) => {
-                        unsafe {
-                            let fiber = &mut **p_fiber;
-                            fiber.mark();
-                            fiber.mark_children();
-                        }
-                    }
-                    Value::Klass(p) => {
-                        unsafe {
-                            let p = &mut **p;
-                            p.mark();
-                            p.mark_children();
-                        }
-                    }
-                    Value::Instance(p) => {
-                        unsafe {
-                            let p = &mut **p;
-                            p.mark();
-                            p.mark_children();
-                        }
-                    }
-                    Value::Module(p) => {
-                        unsafe {
-                            let p = &mut **p;
-                            p.mark();
-                            p.mark_children();
-                        }
-                    }
-                    
-                    
-    
+                    Value::Fiber(p_fiber) => unsafe {
+                        let fiber = &mut **p_fiber;
+                        fiber.mark();
+                        fiber.mark_children();
+                    },
+                    Value::Klass(p) => unsafe {
+                        let p = &mut **p;
+                        p.mark();
+                        p.mark_children();
+                    },
+                    Value::Instance(p) => unsafe {
+                        let p = &mut **p;
+                        p.mark();
+                        p.mark_children();
+                    },
+                    Value::Module(p) => unsafe {
+                        let p = &mut **p;
+                        p.mark();
+                        p.mark_children();
+                    },
+
                     _ => {}
                 }
             };
@@ -1168,9 +1215,13 @@ impl Vm {
             mark_val!(val);
         }
         for g in self.global.iter_mut() {
-            for (_s,v) in g.iter_mut() {
+            for (_s, v) in g.iter_mut() {
                 mark_val!(v);
             }
+        }
+        unsafe {
+            (*self.executing_fiber).mark();
+            (*self.executing_fiber).mark_children();
         }
         let mut new_obj_vec: Vec<Box<dyn GCObject>> = self
             .objects
@@ -1212,9 +1263,49 @@ impl Vm {
             }
         }
     }
-    pub fn load_module(&mut self, module_name: Option<&str>, src: &str) {
+    pub fn load_module(&mut self, src: &str) -> EvalResult{
+        let mut scanner = ScannerCtx::new(src, &mut self.string_pool);
+        scanner.parse()?;
+        let mut parser = ParserCtx::new(scanner.finish(), HashMap::new(), &mut self.string_pool);
+        parser.parse_prog()?;
+        let res = parser.finish();
+        dbg!(&res.chunk);
+        let mut call_frames = Vec::<CallFrame>::new();
+        let mut b_chunk = Box::new(res.chunk);
+        let mut closure = Box::new(Closure {
+            marked: false,
+            chunk: b_chunk.as_mut() as *const Chunk,
+            upvalues: Vec::new(),
+            this_ref: None,
+        });
         
+        call_frames.push(CallFrame::new(
+            0,
+            closure.as_mut() as *mut Closure,
+            Vec::new(),
+        ));
+        let mut fiber = Box::new(Fiber {
+            marked: false,
+            call_frames: call_frames,
+            stack: {
+                let mut vec = Vec::new();
+                for _ in 0..b_chunk.num_locals {
+                    vec.push(Value::Nil);
+                }
+                vec
+            },
+            state: FiberState::Loader,
+            prev: self.executing_fiber,
+        });
+        // run module code in fresh env
+        self.global.push(HashMap::new());
+        self.executing_fiber = fiber.as_mut() as *mut Fiber;
+        self.loaded_chunk.push(b_chunk);
+        self.objects.push(closure);
+        self.objects.push(fiber);
+        Ok(())
     }
+
     pub fn make_managed_string(&mut self, s: &str) -> IString {
         self.string_pool.creat_istring(s)
     }

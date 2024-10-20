@@ -11,7 +11,7 @@ use std::io::Write;
 use compiler::parser::{self, ParserCtx};
 use compiler::scanner::{self, ScannerCtx};
 use interned_string::{IString, StringPool};
-use native::sloth_print_val;
+use native::{sloth_load_module, sloth_print_val};
 use vm::{CallFrame, Vm};
 
 pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
@@ -25,18 +25,27 @@ pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
     let parser_result = parser.finish();
     println!("{:?}", parser_result.chunk);
     let _ = std::io::stdout().flush();
+    let cwd = std::env::current_dir().unwrap();
+    println!("interpreter running in {cwd:?}");
     let mut vm = Box::new(Vm::new(
         parser_result.chunk,
         HashMap::new(),
         string_pool,
         true,
+        cwd,
     ));
     vm.load_native_module(
         None,
-        vec![(
-            "print".to_owned(),
-            Value::NativeFunction(sloth_print_val as *mut u8),
-        )],
+        vec![
+            (
+                "print".to_owned(),
+                Value::NativeFunction(sloth_print_val as *mut u8),
+            ),
+            (
+                "import".to_owned(),
+                Value::NativeFunction(sloth_load_module as *mut u8),
+            ),
+        ],
     );
     if !only_compile {
         vm.run()?;
@@ -259,7 +268,7 @@ pub struct Dict {
     pub marked: bool,
     pub dict: HashMap<IString, Value>,
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum FiberState {
     /// not executed yet
     Initial,
@@ -271,6 +280,8 @@ pub enum FiberState {
     Error,
     /// finished Fiber should not be resumed
     Finished,
+    /// loading module
+    Loader,
 }
 #[derive(Debug)]
 pub struct Fiber {
@@ -478,6 +489,43 @@ mod test {
         let src = r#"
             (1 < 2) or ||{print("not executed");}();
             (1 < 2) and ||{print("executed");}();
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn lambda_in_method() {
+        let src = r#"
+            class Foo{
+                func __init__() {
+                    this.age = 24;
+                }
+                func des() {
+                    return ||{
+                        this.age = this.age + 1;
+                        print(this.age);
+                    };
+                }
+            }
+            var foo = Foo();
+            var des = foo.des();
+            des();
+            des();
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn load_module() {
+        let src = r#"
+            var m = import("test_module.slt");
+            var counter = m.Counter();
+            print(m.PI);
+            counter.inc_by(100);
+            print(counter.value);
+            counter.dec_by(50);
+            print(counter.value);
         "#;
         let res = run_string(&src, false);
         println!("{res:?}");

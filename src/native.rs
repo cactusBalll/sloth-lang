@@ -1,6 +1,6 @@
 use crate::*;
 //type NativeFResult = Result<Value, String>;
-use std::collections::HashSet;
+use std::{collections::HashSet, fs::File, io::Read};
 
 
 
@@ -32,6 +32,27 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
 }
 
 
+pub fn sloth_load_module(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    if arg_num != 1 {
+        vm.get_stack().pop();
+        vm.get_stack().push(Value::Nil);
+    }
+    let path = vm.get_stack().pop().unwrap();
+    if let Value::String(path) = path {
+        vm.get_stack().pop();
+        vm.fiber_changed = true;
+        let full_path = vm.interpreter_cwd.join(path.get_inner());
+        let mut file = File::open(&full_path).unwrap();
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).unwrap();
+        vm.load_module(&buf).unwrap();
+        // return and entering load_module fiber
+        // returned module will be pushed to stack later.
+    } else {
+        vm.get_stack().pop();
+        vm.get_stack().push(Value::Nil);
+    }
+}
 
 pub fn sloth_print_val(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let mut val_to_print = Vec::new();

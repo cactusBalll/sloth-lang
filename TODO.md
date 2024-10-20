@@ -12,6 +12,7 @@
 - 重构chunk done
 - Class-based OOP done
 - OCaml style PIPE Operator `|>` done
+- list assginment
 - **break/continue**
 - **range-based for & iterator protocol**
 - **operator overload**

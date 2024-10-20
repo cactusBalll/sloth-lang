@@ -1,0 +1,12 @@
+var PI = 3.14159;
+class Counter{
+    func __init__(){
+        this.value = 24;
+    }
+    func inc_by(x) {
+        this.value = this.value + x;
+    }
+    func dec_by(x) {
+        this.value = this.value - x;
+    }
+}
