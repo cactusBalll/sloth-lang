@@ -1,3 +1,4 @@
+use fmt::format;
 use interned_string::{IString, StringPool};
 
 use crate::*;
@@ -160,7 +161,7 @@ impl Vm {
             // dbg!(&instr);
             // dbg!(&stack);
             // dbg!(self.global.last().unwrap());
-            
+
             if self.debug {}
             match instr {
                 Instr::Add => {
@@ -553,14 +554,6 @@ impl Vm {
                         Value::Instance(p_instance) => {
                             if let Value::String(i) = idx {
                                 let instance = unsafe { &mut *p_instance };
-                                // if let Some(v) = instance.fields.get_mut(&i) {
-                                //     *v = val;
-                                // } else {
-                                //     return Err(EvalError::VariableNotFound(
-                                //         self.eval_err_str("field in instance not found"),
-                                //     ));
-                                // }
-                                // Maybe only allow bind value in constructor?
                                 instance.fields.insert(i.clone(), val);
                             } else {
                                 return Err(EvalError::TypeError(
@@ -582,65 +575,111 @@ impl Vm {
                     call_frame.pc = pc;
                 }
                 Instr::JumpIfNot(x) => {
-                    if let Value::Bool(b) = stack.last().unwrap() {
-                        if !b {
-                            let last_pc = call_frame.pc as i32;
-                            let pc = (last_pc + x) as usize;
-                            call_frame.pc = pc;
-                        } else {
-                            self.pc_add();
-                        }
+                    let b = stack.last().unwrap().to_bool();
+                    if !b {
+                        let last_pc = call_frame.pc as i32;
+                        let pc = (last_pc + x) as usize;
+                        call_frame.pc = pc;
                     } else {
-                        if let Value::Nil = stack.last().unwrap() {
-                            let last_pc = call_frame.pc as i32;
-                            let pc = (last_pc + x) as usize;
-                            call_frame.pc = pc;
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("condition expression must be Bool"),
-                            ));
-                        }
+                        self.pc_add();
                     }
                 }
                 Instr::JumpIfTrue(x) => {
-                    if let Value::Bool(b) = stack.last().unwrap() {
-                        if *b {
-                            let last_pc = call_frame.pc as i32;
-                            let pc = (last_pc + x) as usize;
-                            call_frame.pc = pc;
-                        } else {
-                            self.pc_add();
-                        }
+                    let b = stack.last().unwrap().to_bool();
+                    if b {
+                        let last_pc = call_frame.pc as i32;
+                        let pc = (last_pc + x) as usize;
+                        call_frame.pc = pc;
                     } else {
-                        if let Value::Nil = stack.last().unwrap() {
-                            self.pc_add();
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("condition expression must be Bool"),
-                            ));
-                        }
+                        self.pc_add();
                     }
                 }
 
                 Instr::Iterator => {
-                    let iterator = match stack.pop().unwrap() {
-                        Value::Range(l, r) => Value::Range(l, r),
-                        Value::String(istring) => todo!(),
-                        Value::Array(_) => todo!(),
-                        Value::Dictionary(_) => todo!(),
+                    match stack.pop().unwrap() {
+                        Value::Range(l, r) => {
+                            let v = Value::Range(l, r);
+                            stack.push(v);
+                            self.pc_add();
+                        }
+                        Value::String(istring) => {
+                            let v = Value::StringIter(istring.clone(), 0);
+                            stack.push(v);
+                            self.pc_add();
+                        }
+                        Value::Array(array) => {
+                            let v = Value::ArrayIter(array, 0);
+                            stack.push(v);
+                            self.pc_add();
+                        }
+                        Value::Dictionary(dict) => unsafe {
+                            // [[k,v], [k,v], [k,v],...]
+                            let kv_arr = (*dict)
+                                .dict
+                                .iter()
+                                .map(|(k, v)| {
+                                    let entry = vec![Value::String(k.clone()), v.clone()];
+                                    let mut b_entry = Box::new(Array {
+                                        marked: false,
+                                        array: entry,
+                                    });
+                                    let p_entry = b_entry.as_mut() as *mut Array;
+                                    self.objects.push(b_entry);
+                                    Value::Array(p_entry)
+                                })
+                                .collect();
+                            let mut b_array = Box::new(Array {
+                                marked: false,
+                                array: kv_arr,
+                            });
+                            let p_array = b_array.as_mut() as *mut Array;
+                            self.objects.push(b_array);
+                            let v = Value::ArrayIter(p_array, 0);
+                            stack.push(v);
+                            self.pc_add();
+                        },
+                        Value::Instance(p_instance) => {
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__iter__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                let v = v.clone();
+                                stack.push(v);
+                                self.pc_add();
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        self.call_routine(0)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("method not found"),
+                                    ));
+                                }
+                            };
+                        }
                         _ => {
                             return Err(EvalError::TypeError(
                                 self.eval_err_str("not subscriptable"),
                             ));
                         }
                     };
-                    stack.push(iterator);
-                    self.pc_add();
                 }
 
-                Instr::Next => {
-                    if let Value::Range(l, r) = stack.last_mut().unwrap() {
-                        let v = if *l - *r < f64::EPSILON {
+                Instr::Next => match stack.last_mut().unwrap() {
+                    Value::Range(l, r) => {
+                        let v = if (*l - *r).abs() < f64::EPSILON {
                             Value::Nil
                         } else if l < r {
                             *l += 1.;
@@ -653,10 +692,68 @@ impl Vm {
                         };
                         stack.push(v);
                         self.pc_add();
-                    } else {
-                        todo!()
                     }
-                }
+                    Value::ArrayIter(arr, i) => unsafe {
+                        if *i >= (**arr).array.len() {
+                            stack.push(Value::Nil);
+                            self.pc_add();
+                        } else {
+                            let v = (**arr).array[*i].clone();
+                            *i += 1;
+                            stack.push(v);
+                            self.pc_add();
+                        }
+                    },
+                    Value::StringIter(s, i) => {
+                        // performance?
+                        let c = s.get_inner().chars().skip(*i).next();
+                        if let Some(c) = c {
+                            *i += 1;
+                            let s = format!("{c}");
+                            stack.push(Value::String(self.string_pool.creat_istring(&s)));
+                            self.pc_add();
+                        } else {
+                            stack.push(Value::Nil);
+                            self.pc_add();
+                        }
+                    }
+                    Value::Instance(p_instance) => {
+                        let instance = unsafe { &mut **p_instance };
+                        let protocol_func_name = self.string_pool.creat_istring("__next__");
+                        if let Some(v) = instance.fields.get(&protocol_func_name) {
+                            let v = v.clone();
+                            stack.push(v);
+                            self.pc_add();
+                        } else {
+                            if let Some(method) =
+                                unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                            {
+                                if let Value::Closure(method) = method {
+                                    let mut binded_closure = unsafe { (**method).clone() };
+                                    binded_closure.this_ref = Some(*p_instance);
+                                    let mut b_binded_closure = Box::new(binded_closure);
+                                    let p_binded_closure =
+                                        b_binded_closure.as_mut() as *mut Closure;
+                                    self.objects.push(b_binded_closure);
+                                    let f = Value::Closure(p_binded_closure);
+                                    stack.push(f);
+                                    self.call_routine(0)?;
+                                } else {
+                                    unreachable!()
+                                }
+                            } else {
+                                return Err(EvalError::VariableNotFound(
+                                    self.eval_err_str("method not found"),
+                                ));
+                            }
+                        };
+                    }
+                    _ => {
+                        return Err(EvalError::VariableNotFound(
+                            self.eval_err_str("not a Iterator Object"),
+                        ));
+                    }
+                },
                 Instr::Call(x) => {
                     let val = &stack[stack.len() - x - 1];
                     if let Value::Closure(p_closure) = val {
@@ -844,20 +941,21 @@ impl Vm {
                                 self.pc_add();
                                 if (*ret_from).state == FiberState::Loader {
                                     let module_namespace = self.global.pop().unwrap();
-                                    let mut b_module_namespace_dict = Box::new(Dict{
+                                    let mut b_module_namespace_dict = Box::new(Dict {
                                         marked: false,
                                         dict: module_namespace,
                                     });
-                                    let p_module_namespace_dict = b_module_namespace_dict.as_mut() as *mut Dict;
+                                    let p_module_namespace_dict =
+                                        b_module_namespace_dict.as_mut() as *mut Dict;
                                     self.objects.push(b_module_namespace_dict);
-                                    self.get_stack().push(Value::Dictionary(p_module_namespace_dict));
+                                    self.get_stack()
+                                        .push(Value::Dictionary(p_module_namespace_dict));
                                 }
                             } else {
                                 return Ok(());
                             }
                         }
                     }
-                    
                 }
                 Instr::GetSuperMethod => {
                     let idx = stack.pop().unwrap();
@@ -1206,7 +1304,11 @@ impl Vm {
                         p.mark();
                         p.mark_children();
                     },
-
+                    Value::ArrayIter(p, _) => unsafe {
+                        let p = &mut **p;
+                        p.mark();
+                        p.mark_children();
+                    },
                     _ => {}
                 }
             };
@@ -1263,7 +1365,7 @@ impl Vm {
             }
         }
     }
-    pub fn load_module(&mut self, src: &str) -> EvalResult{
+    pub fn load_module(&mut self, src: &str) -> EvalResult {
         let mut scanner = ScannerCtx::new(src, &mut self.string_pool);
         scanner.parse()?;
         let mut parser = ParserCtx::new(scanner.finish(), HashMap::new(), &mut self.string_pool);
@@ -1278,7 +1380,7 @@ impl Vm {
             upvalues: Vec::new(),
             this_ref: None,
         });
-        
+
         call_frames.push(CallFrame::new(
             0,
             closure.as_mut() as *mut Closure,

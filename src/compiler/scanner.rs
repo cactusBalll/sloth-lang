@@ -54,7 +54,7 @@ impl<'a> ScannerCtx<'a> {
             ("if", Token::If),
             ("else", Token::Else),
             ("func", Token::Function),
-            ("Nil", Token::Nil),
+            ("nil", Token::Nil),
             ("return", Token::Return),
             ("except", Token::Except),
             ("class", Token::Class),
@@ -274,14 +274,23 @@ impl<'a> ScannerCtx<'a> {
     }
     fn number(&mut self) -> Result<f64, String> {
         let mut ret = String::new();
+
         loop {
             let c = self.peek();
             match c {
                 Some(c) => {
-                    if c.is_ascii_digit() || c == '.' {
+                    if c.is_ascii_digit(){
                         ret.push(c);
                         self.advance()?;
-                    } else {
+                    } else if c == '.' {
+                        let c2 = self.peek();
+                        if Some('.') == c2 {
+                            //.. and ..=
+                            break;
+                        }
+                        ret.push(c);
+                        self.advance()?;
+                    }else {
                         break;
                     }
                 }

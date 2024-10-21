@@ -16,6 +16,7 @@
 - **break/continue**
 - **range-based for & iterator protocol**
 - **operator overload**
+- **类型强制**
 
 ## tier-2 TODO
 - better error system

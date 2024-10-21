@@ -83,7 +83,7 @@ fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
         }
 
         Value::String(s) => {
-            print!("\"{s}\"")
+            print!("{s}")
         }
         Value::Array(a) => {
             if visited_loc.get(&(*a as *mut u8)).is_some() {

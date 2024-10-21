@@ -150,6 +150,7 @@ impl<'a> ParserCtx<'a> {
                         return Err(self.parser_err_str("break can ONLY be used inside loops"));
                     } else {
                         self.advance();
+                        self.advance();
                         self.emit(Instr::Nop);
                         self.func_ctx_stack
                             .last_mut()
@@ -165,6 +166,7 @@ impl<'a> ParserCtx<'a> {
                     if !self.func_ctx_stack.last().unwrap().loop_ctx {
                         return Err(self.parser_err_str("continue can ONLY be used inside loops"));
                     } else {
+                        self.advance();
                         self.advance();
                         self.emit(Instr::Nop);
                         self.func_ctx_stack
@@ -316,20 +318,22 @@ impl<'a> ParserCtx<'a> {
         self.advance();
         self.consume(Token::LParen)?;
         self.open_block();
-
+        self.consume(Token::Var)?;
         if let Token::Symbol(iter_var) = self.peek_not_eof()? {
             self.add_local(&iter_var)?;
         } else {
             return Err(self.parser_err_str("expect iterate variable `Symbol`"));
         }
+        self.advance();
         let iter_var_slot = self.chunk[self.depth].num_locals - 1;
         self.consume(Token::Colon)?;
         self.parse_rval_expr(PrattPrecedence::Lowest)?;
+        self.consume(Token::RParen)?;
         self.emit(Instr::Iterator);
         let loop_start_point = self.chunk[self.depth].bytecodes.len();
         self.emit(Instr::Next);
-        self.emit(Instr::JumpIfNot(0));
         let backpatch_point = self.chunk[self.depth].bytecodes.len();
+        self.emit(Instr::JumpIfNot(0));
         self.emit(Instr::SetLocal(iter_var_slot));
         // self.emit(Instr::Pop);
 
@@ -340,7 +344,7 @@ impl<'a> ParserCtx<'a> {
             loop_start_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
         ));
         self.chunk[self.depth].bytecodes[backpatch_point] = Instr::JumpIfNot(
-            backpatch_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
+            self.chunk[self.depth].bytecodes.len() as i32 - backpatch_point as i32,
         );
         // pop Nil
         self.emit(Instr::Pop);
@@ -637,7 +641,7 @@ impl<'a> ParserCtx<'a> {
     }
 
     fn add_local(&mut self, symbol: &IString) -> Result<(), String> {
-        if self.depth == 0 {
+        if self.depth == 0 && self.func_ctx_stack[self.depth].block_ctx_stack.len() == 1{
             // outermost scope => Global
             let s = symbol.clone();
             self.exported_symbols.push(s);
@@ -1144,16 +1148,16 @@ impl<'a> ParserCtx<'a> {
             }
             return VarLoc::ThisRef;
         }
-        if depth == 0 {
-            // stacktop = GLOBAL[constant[idx]]
-            let idx = self.push_unique_string(symbol);
-            return VarLoc::Global(idx);
-        }
         // from innermost Block to outermost Block of current Function
         for ctx in self.func_ctx_stack[depth].block_ctx_stack.iter().rev() {
             if let Some(x) = ctx.symbol_table.get(symbol) {
                 return VarLoc::Local(*x);
             }
+        }
+        if depth == 0 {
+            // stacktop = GLOBAL[constant[idx]]
+            let idx = self.push_unique_string(symbol);
+            return VarLoc::Global(idx);
         }
         if let Some(x) = self.chunk[depth].upvalues.iter().position(|upv| match upv {
             UpValueDecl::Ref(_, s) => s == symbol,

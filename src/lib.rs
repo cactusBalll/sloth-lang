@@ -73,6 +73,22 @@ pub enum Value {
 
     Klass(*mut Klass),
     Instance(*mut Instance),
+
+    StringIter(IString, usize),
+    ArrayIter(*mut Array, usize),
+}
+
+impl Value {
+    pub fn to_bool_v(&self) -> Value {
+        Value::Bool(self.to_bool())
+    }
+    pub fn to_bool(&self) -> bool {
+        match self {
+            Value::Nil => false,
+            Value::Bool(v) => *v,
+            _ => true,
+        }
+    }
 }
 
 trait GCObject {
@@ -517,6 +533,42 @@ mod test {
         println!("{res:?}");
     }
     #[test]
+    fn loop1() {
+        let src = r#"
+        var a = 3;
+        while (true) {
+            a = a - 1;
+            if (a <= 0) {
+                break;
+            }
+        }
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn loop2() {
+        let src = r#"
+        var a = 10;
+        while (true) {
+            a = a - 1;
+            if (a <= 0) {
+                break;
+            }
+            var b = 10;
+            while(true) {
+                b = b - 1;
+                if (b <= 0) {
+                    break;
+                }
+                print(b, " ");
+            }
+        }
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+    #[test]
     fn load_module() {
         let src = r#"
             var m = import("test_module.slt");
@@ -526,6 +578,64 @@ mod test {
             print(counter.value);
             counter.dec_by(50);
             print(counter.value);
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn for_loop() {
+        let src = r#"
+            for (var i: 1..10) {
+                print(i);
+            }
+            print("\n");
+            for (var i: 1..=10) {
+                print(i);
+            }
+            print("\n");
+            for (var c: "hello world") {
+                print(c);
+            }
+            print("\n");
+            for (var i: [1,1,4,5,1,4]) {
+                print(i);
+            }
+            print("\n");
+            for (var i: @("msvc":2, "clang":3, "gcc":5, "icc":9, "emscripten": 7)) {
+                print(i[0], i[1]);
+            }
+            print("\n");
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn iterator_protocol() {
+        let src = r#"
+            class Foo{
+                func __iter__() {
+                    class Iter{
+                        func __init__() {
+                            this.x = 1;
+                        }
+                        func __next__() {
+                            this.x = this.x + 1;
+                            if (this.x < 20) {
+                                return this.x;
+                            } else {
+                                return nil;
+                            }
+                        }
+                    }
+                    return Iter();
+                }
+            }
+            var foo = Foo();
+            for (var i: foo) {
+                print(i);
+            }
         "#;
         let res = run_string(&src, false);
         println!("{res:?}");
