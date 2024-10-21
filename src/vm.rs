@@ -244,6 +244,30 @@ impl Vm {
                     stack.push(Value::Bool(opr1 && opr2));
                     self.pc_add();
                 }
+                Instr::ClassIs => {
+                    if let Value::Klass(klass) = stack.pop().unwrap() {
+                        if let Value::Instance(instance) = stack.pop().unwrap() {
+                            unsafe {
+                                let mut p_klass = (*instance).klass;
+                                let mut is_class = false;
+                                while p_klass != null_mut() {
+                                    if p_klass == klass {
+                                        is_class = true;
+                                        break;
+                                    }
+                                    p_klass = (*p_klass).super_klass;
+                                }
+                                stack.push(Value::Bool(is_class));
+                            }
+                        } else {
+                            stack.push(Value::Bool(false));
+                        }
+                    } else {
+                        return Err(EvalError::TypeError(
+                            self.eval_err_str("`is` can ONLY check classes, r-hand must be Class"),
+                        ));
+                    }
+                }
                 Instr::MakeRange => {
                     let (opr1, opr2) = self.stack_get_number()?;
                     stack.push(Value::Range(opr1, opr2));

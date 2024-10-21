@@ -426,6 +426,8 @@ pub enum Instr {
     LoadTrue,
     LoadFalse,
 
+    ClassIs,
+
     Pop,
     Swap2,       /*change top 2 value on the stack*/
     Call(usize), /*parameter num*/

@@ -1,6 +1,6 @@
 use crate::*;
 //type NativeFResult = Result<Value, String>;
-use std::{collections::HashSet, fs::File, io::Read};
+use std::{collections::HashSet, fs::File, io::{self, Read}};
 
 
 
@@ -8,7 +8,7 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
     let val = vm.get_stack().pop().unwrap_or(Value::Nil);
     macro_rules! vstr {
         ($s:expr) => {
-            Value::Nil
+            vm.make_managed_string($s)
         };
     }
     let v = match val {
@@ -27,7 +27,7 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
         Value::Range(_, _) => vstr!("Range"),
         _ => vstr!("..."),
     };
-    vm.get_stack().push(v);
+    vm.get_stack().push(Value::String(v));
     
 }
 
@@ -70,6 +70,16 @@ pub fn sloth_print_val(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // Functions always have ONE return Value
     vm.get_stack().push(Value::Nil);
 }
+
+pub fn sloth_input(vm: &mut Vm, _arg_num: usize, _protected: bool) {
+    let mut buffer = String::new();
+    // blocking...
+    let _ = io::stdin().read_line(&mut buffer);
+    let istring = vm.make_managed_string(&buffer);
+    vm.get_stack().push(Value::String(istring));
+}
+
+
 fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
     match val {
         Value::Nil => {
@@ -134,13 +144,13 @@ fn print_array(arr: *mut Array, visited_loc: &mut HashSet<*mut u8>) {
 }
 fn print_dict(dict: *mut Dict, visited_loc: &mut HashSet<*mut u8>) {
     let dict = unsafe { &*dict };
-    print!("{{");
+    print!("@(");
     for (key, val) in dict.dict.iter() {
-        print!("{key}>");
+        print!("{key}:");
         print_val(val, visited_loc);
         print!(",");
     }
-    print!("}}");
+    print!(")");
 }
 fn print_mat(mat: *mut Matrix, _visited_loc: &mut HashSet<*mut u8>) {
     let mat = unsafe { &*mat };

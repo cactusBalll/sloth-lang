@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 pub enum PrattPrecedence {
     Lowest,
     PipeOp,
+    IsOp,
     Range,
     Or,
     And,
@@ -40,6 +41,7 @@ fn get_precedence(token: &Token) -> PrattPrecedence {
         Token::EEqual | Token::NotEqual => PrattPrecedence::Equal,
         Token::Le | Token::Ge | Token::LArrow | Token::RArrow => PrattPrecedence::Cmp,
         Token::Dots | Token::DotsEq => PrattPrecedence::Range,
+        Token::Is => PrattPrecedence::IsOp,
         Token::PipeOp => PrattPrecedence::PipeOp,
         _ => PrattPrecedence::None,
     }
@@ -983,6 +985,9 @@ impl<'a> ParserCtx<'a> {
                     // `para |> functor` => `functor(para)`
                     self.emit_with_line(Instr::Swap2, line);
                     self.emit_with_line(Instr::Call(1), line);
+                }
+                Token::Is => {
+                    self.emit_with_line(Instr::ClassIs, line);
                 }
                 _ => {}
             }

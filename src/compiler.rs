@@ -70,6 +70,7 @@ pub enum Token {
     Class,
     Super,    //super.
     This,
+    Is,
 
     Dots,     //..
     DotsEq,   //..=

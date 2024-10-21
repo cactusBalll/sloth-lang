@@ -61,6 +61,7 @@ impl<'a> ScannerCtx<'a> {
             ("super", Token::Super),
             ("break", Token::Break),
             ("continue", Token::Continue),
+            ("is", Token::Is),
         ]);
         let single_punct_map: HashMap<char, Token> = HashMap::from([
             ('|', Token::Stick),
