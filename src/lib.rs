@@ -11,9 +11,44 @@ use std::io::Write;
 use compiler::parser::{self, ParserCtx};
 use compiler::scanner::{self, ScannerCtx};
 use interned_string::{IString, StringPool};
-use native::{sloth_load_module, sloth_print_val};
+use native::{
+    sloth_input, sloth_load_module, sloth_print_val, sloth_to_bool, sloth_to_number,
+    sloth_to_string, sloth_typeof,
+};
 use vm::{CallFrame, Vm};
 
+pub fn prelude() -> Vec<(String, Value)> {
+    vec![
+        (
+            "print".to_owned(),
+            Value::NativeFunction(sloth_print_val as *mut u8),
+        ),
+        (
+            "import".to_owned(),
+            Value::NativeFunction(sloth_load_module as *mut u8),
+        ),
+        (
+            "number".to_owned(),
+            Value::NativeFunction(sloth_to_number as *mut u8),
+        ),
+        (
+            "string".to_owned(),
+            Value::NativeFunction(sloth_to_string as *mut u8),
+        ),
+        (
+            "bool".to_owned(),
+            Value::NativeFunction(sloth_to_bool as *mut u8),
+        ),
+        (
+            "input".to_owned(),
+            Value::NativeFunction(sloth_input as *mut u8),
+        ),
+        (
+            "type_string".to_owned(),
+            Value::NativeFunction(sloth_typeof as *mut u8),
+        ),
+    ]
+}
 pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
     let mut string_pool = StringPool::new();
     let mut scanner = ScannerCtx::new(prog, &mut string_pool);
@@ -34,19 +69,7 @@ pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
         true,
         cwd,
     ));
-    vm.load_native_module(
-        None,
-        vec![
-            (
-                "print".to_owned(),
-                Value::NativeFunction(sloth_print_val as *mut u8),
-            ),
-            (
-                "import".to_owned(),
-                Value::NativeFunction(sloth_load_module as *mut u8),
-            ),
-        ],
-    );
+    vm.load_native_module(None, prelude());
     if !only_compile {
         vm.run()?;
     }
@@ -469,6 +492,7 @@ mod test {
     #[test]
     fn class_test() {
         let src = r#"
+            class Fish{}
             class Mammal{
                 func __init__() {
                     this.weight = 100;
@@ -488,6 +512,7 @@ mod test {
 
             var cat = Cat();
             cat.say();
+            print(cat is Cat, cat is Mammal, cat is Fish);
         "#;
         let res = run_string(&src, false);
         println!("{res:?}");

@@ -8,13 +8,13 @@
 - 重构interned string done
 - 消除warning
 - fiber
-- **module**
+- **module** done
 - 重构chunk done
 - Class-based OOP done
 - OCaml style PIPE Operator `|>` done
-- list assginment
-- **break/continue**
-- **range-based for & iterator protocol**
+- ~~list assginment~~
+- **break/continue** done
+- **range-based for & iterator protocol** done
 - **operator overload**
 - **类型强制**
 

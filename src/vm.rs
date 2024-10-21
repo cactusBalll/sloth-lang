@@ -262,6 +262,7 @@ impl Vm {
                         } else {
                             stack.push(Value::Bool(false));
                         }
+                        self.pc_add();
                     } else {
                         return Err(EvalError::TypeError(
                             self.eval_err_str("`is` can ONLY check classes, r-hand must be Class"),
