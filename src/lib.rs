@@ -425,9 +425,12 @@ pub enum Instr {
     InitArray(usize), /*size of array*/
     InitDict(usize),
     PushNil,
-
-    GetCollection,
-    SetCollection,
+    /// . / [] have different semmantic on Instance of Classes
+    /// due to the involvment of operator overriding.
+    /// 0 - []
+    /// 1 - .
+    GetCollection(usize), 
+    SetCollection(usize),
 
     Add,
     Sub,
@@ -700,6 +703,31 @@ mod test {
             var d = a - b;
             print(c.x, c.y);
             print(d.x, d.y);
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn operator_override2() {
+        let src = r#"
+            class Vec{
+                func __init__(arr) {
+                    this.arr = arr;
+                }
+                func __assign__(idx, val) {
+                    this.arr[idx] = val;
+                }
+                func __index__(idx) {
+                    return this.arr[idx];
+                }
+            }
+
+            var vec = Vec([1,3,2,4]);
+            print(vec.arr);
+            vec[2] = 10;
+            vec.__assign__(3,100);
+            print(vec.arr);
+            print(vec[2]);
         "#;
         let res = run_string(&src, false);
         println!("{res:?}");

@@ -700,7 +700,7 @@ impl<'a> ParserCtx<'a> {
                     self.advance();
                     self.parse_rval_expr(PrattPrecedence::Lowest)?;
                     self.consume(Token::RBracket)?;
-                    self.emit_with_line(Instr::GetCollection, line);
+                    self.emit_with_line(Instr::GetCollection(0), line);
                     continue;
                 } else if tk == Token::Dot {
                     let line = self.get_line();
@@ -711,7 +711,7 @@ impl<'a> ParserCtx<'a> {
                     } else {
                         return Err(self.parser_err_str("invalid rval expr"));
                     }
-                    self.emit_with_line(Instr::GetCollection, line);
+                    self.emit_with_line(Instr::GetCollection(1), line);
                     continue;
                 } else {
                     is_assign = false;
@@ -726,9 +726,9 @@ impl<'a> ParserCtx<'a> {
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 // now value is on the top of stack
                 let modified_instr = match last_instr {
-                    Instr::GetCollection => {
+                    Instr::GetCollection(v) => {
                         // idx already on stack[top-1]
-                        Instr::SetCollection
+                        Instr::SetCollection(v)
                     }
                     Instr::GetLocal(x) => Instr::SetLocal(x),
                     Instr::GetGlobal(x) => Instr::SetGlobal(x),
@@ -898,7 +898,7 @@ impl<'a> ParserCtx<'a> {
                 self.advance();
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 self.consume(Token::RBracket)?;
-                self.emit_with_line(Instr::GetCollection, line);
+                self.emit_with_line(Instr::GetCollection(0), line);
                 continue;
             }
             if tk == Token::Dot {
@@ -910,7 +910,7 @@ impl<'a> ParserCtx<'a> {
                 } else {
                     return Err(self.parser_err_str("invalid rval expr"));
                 }
-                self.emit_with_line(Instr::GetCollection, line);
+                self.emit_with_line(Instr::GetCollection(1), line);
                 continue;
             }
             let backpatch_point: usize = self.chunk[self.depth].bytecodes.len();
