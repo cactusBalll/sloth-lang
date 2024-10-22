@@ -914,15 +914,15 @@ impl<'a> ParserCtx<'a> {
                 continue;
             }
             let backpatch_point: usize = self.chunk[self.depth].bytecodes.len();
-            if tk == Token::And || tk == Token::Or {
-                self.emit(Instr::Nop);
-                // discard left value bool
-                self.emit(Instr::Pop);
-            }
             let nprec = get_precedence(&tk);
             if nprec != PrattPrecedence::None {
                 if get_precedence(&tk) <= prec {
                     break;
+                }
+                if tk == Token::And || tk == Token::Or {
+                    self.emit(Instr::Nop);
+                    // discard left value bool
+                    self.emit(Instr::Pop);
                 }
                 self.advance();
                 self.parse_rval_expr(nprec)?;

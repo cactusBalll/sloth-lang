@@ -165,74 +165,434 @@ impl Vm {
             if self.debug {}
             match instr {
                 Instr::Add => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    stack.push(Value::Number(opr1 + opr2));
-                    self.pc_add();
+                    let opr2 = stack.pop().unwrap();
+                    let opr1 = stack.pop().unwrap();
+                    match opr1 {
+                        Value::Number(a) => {
+                            if let Value::Number(b) = opr2 {
+                                let res = a + b;
+                                stack.push(Value::Number(res));
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("unsupported operation on `+`"),
+                                ));
+                            }
+                            self.pc_add();
+                        }
+                        Value::String(a) => {
+                            if let Value::String(b) = opr2 {
+                                let mut res = a.get_inner().to_owned();
+                                res += b.get_inner();
+                                let istring = self.string_pool.creat_istring(&res);
+                                stack.push(Value::String(istring));
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("unsupported operation on `+`"),
+                                ));
+                            }
+                            self.pc_add();
+                        }
+                        Value::Array(a) => {
+                            if let Value::Array(b) = opr2 {
+                                unsafe {
+                                    let mut new_arr = Vec::new();
+                                    (*a).array.iter().for_each(|x| new_arr.push(x.clone()));
+                                    (*b).array.iter().for_each(|x| new_arr.push(x.clone()));
+                                    let mut b_new_arr = Box::new(Array {
+                                        marked: false,
+                                        array: new_arr,
+                                    });
+                                    let p_new_arr = b_new_arr.as_mut() as *mut Array;
+                                    self.objects.push(b_new_arr);
+                                    stack.push(Value::Array(p_new_arr));
+                                }
+                                self.pc_add();
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("unsupported operation on `+`"),
+                                ));
+                            }
+                        }
+                        Value::Instance(p_instance) => {
+                            // a + b => a.__add__(b)
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__add__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                return Err(EvalError::CallError(
+                                    self.eval_err_str("`__add__` defined as field of Instance"),
+                                ));
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        stack.push(opr2);
+                                        self.call_routine(1)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("`__add__` method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("unsupported operation on `+`"),
+                            ))
+                        }
+                    }
                 }
                 Instr::Sub => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    stack.push(Value::Number(opr1 - opr2));
-                    self.pc_add();
+                    let opr2 = stack.pop().unwrap();
+                    let opr1 = stack.pop().unwrap();
+                    match opr1 {
+                        Value::Number(a) => {
+                            if let Value::Number(b) = opr2 {
+                                let res = a - b;
+                                stack.push(Value::Number(res));
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("unsupported operation on `-`"),
+                                ));
+                            }
+                            self.pc_add();
+                        }
+                        Value::Instance(p_instance) => {
+                            // a + b => a.__add__(b)
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__sub__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                return Err(EvalError::CallError(
+                                    self.eval_err_str("`__sub__` defined as field of Instance"),
+                                ));
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        stack.push(opr2);
+                                        self.call_routine(1)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("`__sub__` method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("unsupported operation on `-`"),
+                            ))
+                        }
+                    }
                 }
                 Instr::Mul => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    stack.push(Value::Number(opr1 * opr2));
-                    self.pc_add();
+                    let opr2 = stack.pop().unwrap();
+                    let opr1 = stack.pop().unwrap();
+                    match opr1 {
+                        Value::Number(a) => {
+                            if let Value::Number(b) = opr2 {
+                                let res = a * b;
+                                stack.push(Value::Number(res));
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("unsupported operation on `*`"),
+                                ));
+                            }
+                            self.pc_add();
+                        }
+                        Value::Instance(p_instance) => {
+                            // a + b => a.__add__(b)
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__mul__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                return Err(EvalError::CallError(
+                                    self.eval_err_str("`__mul__` defined as field of Instance"),
+                                ));
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        stack.push(opr2);
+                                        self.call_routine(1)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("`__mul__` method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("unsupported operation on `*`"),
+                            ))
+                        }
+                    }
                 }
                 Instr::Div => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    if opr2 < 1e-5 {
-                        return Err(EvalError::ArithmError(self.eval_err_str("div by 0")));
+                    let opr2 = stack.pop().unwrap();
+                    let opr1 = stack.pop().unwrap();
+                    match opr1 {
+                        Value::Number(a) => {
+                            if let Value::Number(b) = opr2 {
+                                if b < 1e-5 {
+                                    return Err(EvalError::ArithmError(
+                                        self.eval_err_str("div by 0"),
+                                    ));
+                                }
+                                let res = a / b;
+                                stack.push(Value::Number(res));
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("unsupported operation on `/`"),
+                                ));
+                            }
+                            self.pc_add();
+                        }
+                        Value::Instance(p_instance) => {
+                            // a + b => a.__add__(b)
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__div__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                return Err(EvalError::CallError(
+                                    self.eval_err_str("`__div__` defined as field of Instance"),
+                                ));
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        stack.push(opr2);
+                                        self.call_routine(1)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("`__div__` method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("unsupported operation on `/`"),
+                            ))
+                        }
                     }
-                    stack.push(Value::Number(opr1 / opr2));
-                    self.pc_add();
                 }
                 Instr::Mod => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    if opr2 < 1e-5 {
-                        return Err(EvalError::ArithmError(self.eval_err_str("div by 0")));
+                    let opr2 = stack.pop().unwrap();
+                    let opr1 = stack.pop().unwrap();
+                    match opr1 {
+                        Value::Number(a) => {
+                            if let Value::Number(b) = opr2 {
+                                if b < 1e-5 {
+                                    return Err(EvalError::ArithmError(
+                                        self.eval_err_str("div by 0"),
+                                    ));
+                                }
+                                let res = a % b;
+                                stack.push(Value::Number(res));
+                            } else {
+                                return Err(EvalError::TypeError(
+                                    self.eval_err_str("unsupported operation on `%`"),
+                                ));
+                            }
+                            self.pc_add();
+                        }
+                        Value::Instance(p_instance) => {
+                            // a + b => a.__add__(b)
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__mod__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                return Err(EvalError::CallError(
+                                    self.eval_err_str("`__mod__` defined as field of Instance"),
+                                ));
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        stack.push(opr2);
+                                        self.call_routine(1)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("`__mod__` method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("unsupported operation on `%`"),
+                            ))
+                        }
                     }
-                    let opr1 = opr1 as i64;
-                    let opr2 = opr2 as i64;
-                    stack.push(Value::Number((opr1 % opr2) as f64));
-                    self.pc_add();
                 }
                 Instr::Negate => {
-                    let opr = self.stack_get_number1()?;
-                    stack.push(Value::Number(-opr));
-                    self.pc_add();
+                    let opr1 = stack.pop().unwrap();
+                    match opr1 {
+                        Value::Number(a) => {
+                            stack.push(Value::Number(-a));
+                            self.pc_add();
+                        }
+                        Value::Instance(p_instance) => {
+                            // -a => a.__neg__()
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__neg__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                return Err(EvalError::CallError(
+                                    self.eval_err_str("`__neg__` defined as field of Instance"),
+                                ));
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        self.call_routine(0)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("`__neg__` method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("unsupported operation on `-(pfx)`"),
+                            ))
+                        }
+                    }
                 }
                 Instr::Gt => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    stack.push(Value::Bool(opr1 > opr2));
-                    self.pc_add();
+                    self.binary_predicate_impl(|x, y| x > y, "__gt__")?;
                 }
                 Instr::Lt => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    stack.push(Value::Bool(opr1 < opr2));
-                    self.pc_add();
+                    self.binary_predicate_impl(|x, y| x < y, "__lt__")?;
                 }
                 Instr::Ge => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    stack.push(Value::Bool(opr1 >= opr2));
-                    self.pc_add();
+                    self.binary_predicate_impl(|x, y| x >= y, "__ge__")?;
                 }
                 Instr::Le => {
-                    let (opr1, opr2) = self.stack_get_number()?;
-                    stack.push(Value::Bool(opr1 <= opr2));
-                    self.pc_add();
+                    self.binary_predicate_impl(|x, y| x <= y, "__le__")?;
                 }
                 Instr::Eq => {
-                    let opr2 = stack.pop().unwrap();
-                    let opr1 = stack.pop().unwrap();
-                    stack.push(Value::Bool(opr1 == opr2));
-                    self.pc_add();
+                    self.binary_predicate_impl(|x, y| (x - y).abs() < 1e-5, "__eq__")?;
                 }
                 Instr::Ne => {
-                    let opr2 = stack.pop().unwrap();
-                    let opr1 = stack.pop().unwrap();
-                    stack.push(Value::Bool(opr1 != opr2));
-                    self.pc_add();
+                    self.binary_predicate_impl(|x, y| (x - y).abs() >= 1e-5, "__ne__")?;
+                }
+                Instr::Not => {
+                    let opr1 = self.get_stack().pop().unwrap();
+                    match opr1 {
+                        Value::Bool(a) => {
+                            let res = !a;
+                            self.get_stack().push(Value::Bool(res));
+                            self.pc_add();
+                        }
+                        Value::Instance(p_instance) => {
+                            // not a -> a.__not__()
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name = self.string_pool.creat_istring("__not__");
+                            if let Some(_v) = instance.fields.get(&protocol_func_name) {
+                                return Err(EvalError::CallError(self.eval_err_str(
+                                    "`not` operation defined as field of Instance",
+                                )));
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let Value::Closure(method) = method {
+                                        let mut binded_closure = unsafe { (**method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        self.get_stack().push(f);
+                                        self.call_routine(0)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("`__not__` method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::TypeError(
+                                self.eval_err_str("unsupported `not` operation"),
+                            ))
+                        }
+                    }
                 }
                 Instr::Or => {
                     let (opr1, opr2) = self.stack_get_bool()?;
@@ -1095,6 +1455,65 @@ impl Vm {
         }
     }
 
+    fn binary_predicate_impl(
+        &mut self,
+        op: fn(f64, f64) -> bool,
+        op_name: &str,
+    ) -> Result<(), EvalError> {
+        let opr2 = self.get_stack().pop().unwrap();
+        let opr1 = self.get_stack().pop().unwrap();
+        match opr1 {
+            Value::Number(a) => {
+                if let Value::Number(b) = opr2 {
+                    let res = op(a, b);
+                    self.get_stack().push(Value::Bool(res));
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("unsupported comparing operation"),
+                    ));
+                }
+                self.pc_add();
+            }
+            Value::Instance(p_instance) => {
+                // a op b => a.__op__(b)
+                let instance = unsafe { &mut *p_instance };
+                let protocol_func_name = self.string_pool.creat_istring(op_name);
+                if let Some(v) = instance.fields.get(&protocol_func_name) {
+                    return Err(EvalError::CallError(
+                        self.eval_err_str("coparing operation defined as field of Instance"),
+                    ));
+                } else {
+                    if let Some(method) =
+                        unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                    {
+                        if let Value::Closure(method) = method {
+                            let mut binded_closure = unsafe { (**method).clone() };
+                            binded_closure.this_ref = Some(p_instance);
+                            let mut b_binded_closure = Box::new(binded_closure);
+                            let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
+                            self.objects.push(b_binded_closure);
+                            let f = Value::Closure(p_binded_closure);
+                            self.get_stack().push(f);
+                            self.get_stack().push(opr2);
+                            self.call_routine(1)?;
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        return Err(EvalError::VariableNotFound(
+                            self.eval_err_str("comparing method not found"),
+                        ));
+                    }
+                };
+            }
+            _ => {
+                return Err(EvalError::TypeError(
+                    self.eval_err_str("unsupported comparing operation"),
+                ))
+            }
+        }
+        Ok(())
+    }
     fn call_routine(&mut self, arg_cnt: usize) -> Result<(), EvalError> {
         let stack = self.get_stack();
         let x = arg_cnt;

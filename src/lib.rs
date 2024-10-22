@@ -667,4 +667,41 @@ mod test {
         let res = run_string(&src, false);
         println!("{res:?}");
     }
+
+    #[test]
+    fn operator_override() {
+        let src = r#"
+            class Point{
+                func __init__(x,y) {
+                    this.x = x;
+                    this.y = y;
+                }
+                func get_length() {
+                    return this.x * this.x + this.y * this.y;
+                }
+                func __add__(rhs) {
+                    return Point(this.x + rhs.x, this.y + rhs.y);
+                }
+                func __sub__(rhs) {
+                    return Point(this.x - rhs.x, this.y - rhs.y);
+                }
+                func __eq__(rhs) {
+                    return this.x == rhs.x and this.y == rhs.y;
+                }
+                func __ne__(rhs) {
+                    return not this.__eq__(rhs);
+                }
+            }
+
+            var a = Point(2,3);
+            var b = Point(1,4);
+            print(a == b, a != b);
+            var c = a + b;
+            var d = a - b;
+            print(c.x, c.y);
+            print(d.x, d.y);
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
 }
