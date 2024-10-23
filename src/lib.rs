@@ -1,5 +1,6 @@
 mod compiler;
 mod fiber;
+mod vec;
 #[allow(dead_code)]
 mod interned_string;
 mod native;

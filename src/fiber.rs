@@ -13,6 +13,9 @@ macro_rules! arity_assert {
     };
 }
 // initial -> waiting -> paused -> 
+// I don't know if fiber should be allowed to refer to value on the stack.
+// for now the behavior is undefined if a closure refering to unclosed upvalue
+// is called in another fiber.
 pub fn sloth_fiber_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let mut args = Vec::new();
     let arg_cnt = arg_num - 1;
@@ -28,10 +31,21 @@ pub fn sloth_fiber_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
         panic!("creating Fiber with something not callable.");
     };
 
+    unsafe {
+        for upv_obj in (*p_closure).upvalues.iter() {
+            match &(**upv_obj).value {
+                crate::UpValue::Closed(_value) => {},
+                crate::UpValue::Ref(_) => {
+                    panic!("closure refering to unclosed UpValue CANNOT be used to create Fiber.");
+                }
+            }
+        }
+    }
     let mut stack = Vec::new();
     // bind arguments
     let mut packed_va_list = Vec::new();
     let chunk = unsafe { &*(*p_closure).chunk };
+    
     if chunk.parameter_num != arg_cnt {
         if chunk.parameter_num < arg_cnt && chunk.is_va {
             for idx in chunk.parameter_num..args.len() {
@@ -152,6 +166,7 @@ pub fn sloth_fiber_set_error(vm: &mut Vm, arg_num: usize, _protected: bool) {
 }
 
 pub fn sloth_fiber_check(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(1, arg_num);
     let fiber = if let Value::Fiber(f) = vm.get_stack().pop().unwrap() {
         f
     } else {
@@ -165,6 +180,7 @@ pub fn sloth_fiber_check(vm: &mut Vm, arg_num: usize, _protected: bool) {
 }
 
 pub fn sloth_fiber_resumable(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(1, arg_num);
     let fiber = if let Value::Fiber(f) = vm.get_stack().pop().unwrap() {
         f
     } else {

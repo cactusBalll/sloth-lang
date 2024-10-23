@@ -1,0 +1,26 @@
+func map(f) {
+    return |it| {
+        var ret = [];
+        for (var elem: it) {
+            // need modify
+            ret = ret + [f(elem)];
+        }
+        return ret;
+    }
+}
+
+func reduce(f,acc) {
+    return |it| {
+        var ret = acc;
+        for (var elem: it) {
+            ret = f(acc, elem);
+        }
+        return ret;
+    }
+}
+// need vm support
+func partial_apply(f, x, ...) {
+    func ret(...) {
+        return f(x, ...);
+    }
+}

@@ -102,6 +102,24 @@ impl<'a> ScannerCtx<'a> {
                         }
                     }
                 }
+                c if {c == '/' && self.peekn(2) == Some('*') } => {
+                    self.advance()?;
+                    self.advance()?;
+                    while let Some(comment_c) = self.peek() {
+                        if comment_c != '*' {
+                            self.advance()?;
+                        } else {
+                            let c2 = self.peekn(2);
+                            if c2 == Some('/') {
+                                self.advance()?;
+                                self.advance()?;
+                                break;
+                            } else {
+                                self.advance()?;
+                            }
+                        }
+                    }
+                }
                 c if { c.is_ascii_digit() } => {
                     let x = Token::Number(self.number()?);
                     self.tokens.push(x);
