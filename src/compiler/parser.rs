@@ -849,7 +849,7 @@ impl<'a> ParserCtx<'a> {
                         match self.consume(Token::Comma) {
                             Ok(()) => {}
                             Err(_) => {
-                                if Token::RParen == self.peek_not_eof()? {
+                                if Token::Stick == self.peek_not_eof()? {
                                     //self.advance();
                                     break;
                                 } else {
@@ -989,7 +989,9 @@ impl<'a> ParserCtx<'a> {
                 Token::Is => {
                     self.emit_with_line(Instr::ClassIs, line);
                 }
-                _ => {}
+                _ => {
+                    return Err(self.parser_err_str("infix operator required here."))
+                }
             }
         }
         Ok(())

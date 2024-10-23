@@ -1,4 +1,5 @@
 mod compiler;
+mod fiber;
 #[allow(dead_code)]
 mod interned_string;
 mod native;
@@ -13,7 +14,7 @@ use compiler::scanner::{self, ScannerCtx};
 use interned_string::{IString, StringPool};
 use native::{
     sloth_input, sloth_load_module, sloth_print_val, sloth_to_bool, sloth_to_number,
-    sloth_to_string, sloth_typeof,
+    sloth_to_string, sloth_typeof, sloth_va_arg,
 };
 use vm::{CallFrame, Vm};
 
@@ -47,6 +48,10 @@ pub fn prelude() -> Vec<(String, Value)> {
             "type_string".to_owned(),
             Value::NativeFunction(sloth_typeof as *mut u8),
         ),
+        (
+            "va_arg".to_owned(),
+            Value::NativeFunction(sloth_va_arg as *mut u8),
+        ),
     ]
 }
 pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
@@ -70,6 +75,8 @@ pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
         cwd,
     ));
     vm.load_native_module(None, prelude());
+    let (name, module) = fiber::module_export();
+    vm.load_native_module(Some(&name), module);
     if !only_compile {
         vm.run()?;
     }
@@ -311,7 +318,9 @@ pub struct Dict {
 pub enum FiberState {
     /// not executed yet
     Initial,
-    /// fiber running
+    /// this fiber call resume
+    Waiting,
+    /// running
     Running,
     /// yield or transfer called during execution
     Paused,
@@ -429,7 +438,7 @@ pub enum Instr {
     /// due to the involvment of operator overriding.
     /// 0 - []
     /// 1 - .
-    GetCollection(usize), 
+    GetCollection(usize),
     SetCollection(usize),
 
     Add,
@@ -714,6 +723,9 @@ mod test {
                 func __init__(arr) {
                     this.arr = arr;
                 }
+                func set_vec(...) {
+                    this.arr = va_arg();
+                }
                 func __assign__(idx, val) {
                     this.arr[idx] = val;
                 }
@@ -728,8 +740,65 @@ mod test {
             vec.__assign__(3,100);
             print(vec.arr);
             print(vec[2]);
+            vec.set_vec(1,1,4,5,1,4);
+            print(vec.arr);
         "#;
         let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn fiber0() {
+        let src = r#"
+            var f = fiber.create(|n|{
+                var i = 0;
+                while(i < n) {
+                    var v = fiber.yield(i);
+                    print(v);
+                    i = i + 1;
+                }
+            },10);
+            print(fiber.resume(f));
+            print(fiber.resume(f, "hello fiber"));
+            print(fiber.resume(f, "good fiber"));
+            print(fiber.resume(f, "bad fiber"));
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn fiber1() {
+        let src = r#"
+            var f = fiber.create(|n|{
+                var i = 0;
+                while(i < n) {
+                    var v = fiber.yield(i);
+                    print(v);
+                    i = i + 1;
+                    print(i);
+                    if (i > 5) {
+                        print("error in fiber");
+                        fiber.error();
+                    }
+                }
+            },10);
+            
+            while(fiber.check(f)) {
+                print(fiber.resumable(f));
+                fiber.resume(f);
+            }
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn minimal() {
+        let src = r#"
+            print("233")
+            print("114514");
+        "#;
+        let res = run_string(&src, true);
         println!("{res:?}");
     }
 }

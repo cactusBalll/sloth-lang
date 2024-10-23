@@ -69,12 +69,12 @@ pub struct CallFrame {
     pub closure: *mut Closure,
     pc: usize,
 
-    va_args: Vec<Value>,
+    pub va_args: Vec<Value>,
 
     pub discard_return_value: bool,
 }
 impl CallFrame {
-    fn new(bottom: usize, closure: *mut Closure, va_args: Vec<Value>) -> CallFrame {
+    pub fn new(bottom: usize, closure: *mut Closure, va_args: Vec<Value>) -> CallFrame {
         CallFrame {
             bottom,
             closure,
@@ -127,6 +127,7 @@ impl Vm {
                 }
                 vec
             },
+            // main fiber is always waiting, which prevent other fibers from resuming it
             state: FiberState::Running,
             prev: null_mut() as *mut Fiber,
         });
@@ -151,7 +152,7 @@ impl Vm {
         unsafe { &mut (*self.executing_fiber).stack }
     }
 
-    fn get_call_frame<'a>(&'a self) -> &'a mut CallFrame {
+    pub fn get_call_frame<'a>(&'a self) -> &'a mut CallFrame {
         unsafe { (*self.executing_fiber).call_frames.last_mut().unwrap() }
     }
     pub fn run(&mut self) -> EvalResult {
@@ -1377,7 +1378,6 @@ impl Vm {
                         if !call_frame.discard_return_value {
                             stack.push(Value::Nil); // functions always return exactly ONE value, unless SetCollection
                         }
-                        
                     } else {
                         let val = stack.pop().unwrap(); // closure ret_vall <- get it
                         for _ in callframe.bottom..stack.len() {
@@ -1395,9 +1395,9 @@ impl Vm {
                             if prev != null_mut() {
                                 // back to prev fiber
                                 self.executing_fiber = prev;
-                                // the instruction lead to fiber transfering should be skipped
-                                self.pc_add();
                                 if (*ret_from).state == FiberState::Loader {
+                                    // the instruction lead to fiber transfering should be skipped
+                                    self.pc_add();
                                     let module_namespace = self.global.pop().unwrap();
                                     let mut b_module_namespace_dict = Box::new(Dict {
                                         marked: false,
@@ -1408,6 +1408,10 @@ impl Vm {
                                     self.objects.push(b_module_namespace_dict);
                                     self.get_stack()
                                         .push(Value::Dictionary(p_module_namespace_dict));
+                                } else {
+                                    (*ret_from).state = FiberState::Finished;
+                                    (*prev).state = FiberState::Running;
+                                    self.get_stack().push(Value::Nil);
                                 }
                             } else {
                                 return Ok(());
@@ -1587,10 +1591,14 @@ impl Vm {
         }
         Ok(())
     }
-    fn call_routine(&mut self, arg_cnt: usize,) -> Result<(), EvalError> {
+    fn call_routine(&mut self, arg_cnt: usize) -> Result<(), EvalError> {
         self.call_routine2(arg_cnt, false)
     }
-    fn call_routine2(&mut self, arg_cnt: usize, discard_return_value: bool) -> Result<(), EvalError> {
+    fn call_routine2(
+        &mut self,
+        arg_cnt: usize,
+        discard_return_value: bool,
+    ) -> Result<(), EvalError> {
         let stack = self.get_stack();
         let x = arg_cnt;
         let val = &stack[stack.len() - x - 1];
@@ -1624,7 +1632,6 @@ impl Vm {
         } else if let Value::NativeFunction(f) = val {
             let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(*f) };
             //println!("{:?}", native::sloth_print as *mut u8);
-            stack.pop();
             f(self, x, false);
             if self.fiber_changed {
                 self.fiber_changed = false;
@@ -1931,5 +1938,17 @@ impl Vm {
 
     pub fn make_managed_string(&mut self, s: &str) -> IString {
         self.string_pool.creat_istring(s)
+    }
+
+    pub fn add_object(&mut self, obj: Box<dyn GCObject>) {
+        self.objects.push(obj);
+    }
+
+    pub fn get_current_fiber(&mut self) -> *mut Fiber {
+        return self.executing_fiber;
+    }
+
+    pub fn set_fiber(&mut self, fiber: *mut Fiber) {
+        self.executing_fiber = fiber;
     }
 }

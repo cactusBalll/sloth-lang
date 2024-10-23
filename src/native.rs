@@ -118,6 +118,7 @@ pub fn sloth_to_bool(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn sloth_to_string(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let val = vm.get_stack().pop().unwrap();
+    let _ = vm.get_stack().pop();
     let mut vis = HashSet::new();
     let mut buffer = String::new();
     if let Ok(_) = write_val(&mut buffer, &val, &mut vis) {
@@ -126,6 +127,16 @@ pub fn sloth_to_string(vm: &mut Vm, arg_num: usize, _protected: bool) {
     } else {
         vm.get_stack().push(Value::Nil);
     }
+}
+
+pub fn sloth_va_arg(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    let _ = vm.get_stack().pop();
+    let va_arg_vec = vm.get_call_frame().va_args.clone();
+    let mut b_array = Box::new(Array{marked: false, array: va_arg_vec});
+    let p_array = b_array.as_mut() as *mut Array;
+    vm.add_object(b_array);
+
+    vm.get_stack().push(Value::Array(p_array));
 }
 
 fn write_val(buffer: &mut String, val: &Value, visited_loc: &mut HashSet<*mut u8>) -> fmt::Result {

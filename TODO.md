@@ -17,6 +17,7 @@
 - **range-based for & iterator protocol** done
 - **operator overload** done
 - **类型强制** done
+- **重构Fiber**
 
 ## tier-2 TODO
 - better error system
