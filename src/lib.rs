@@ -1,9 +1,10 @@
 mod compiler;
+mod extension_methods;
 mod fiber;
-mod vec;
 #[allow(dead_code)]
 mod interned_string;
 mod native;
+mod vec;
 mod vm;
 
 use std::collections::HashMap;
@@ -19,6 +20,11 @@ use native::{
 };
 use vm::{CallFrame, Vm};
 
+macro_rules! mf_entry {
+    ($name:expr,$func:expr) => {
+        ($name.to_owned(), Value::NativeFunction($func as *mut u8))
+    };
+}
 pub fn prelude() -> Vec<(String, Value)> {
     vec![
         (
@@ -53,6 +59,7 @@ pub fn prelude() -> Vec<(String, Value)> {
             "va_arg".to_owned(),
             Value::NativeFunction(sloth_va_arg as *mut u8),
         ),
+        mf_entry!("__Array_push__", extension_methods::array_push),
     ]
 }
 pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
@@ -486,6 +493,8 @@ pub enum Instr {
     ClassExtend,
     GetSuperMethod,
     GetThis,
+
+    UnpackVA,
 }
 type NativeFunction = fn(&mut Vm, usize, bool);
 #[cfg(test)]

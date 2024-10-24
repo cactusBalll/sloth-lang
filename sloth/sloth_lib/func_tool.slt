@@ -3,24 +3,20 @@ func map(f) {
         var ret = [];
         for (var elem: it) {
             // need modify
-            ret = ret + [f(elem)];
+            // ret = ret + [f(elem)];
+            ret.push(f(elem));
         }
         return ret;
-    }
+    };
 }
 
 func reduce(f,acc) {
     return |it| {
         var ret = acc;
         for (var elem: it) {
-            ret = f(acc, elem);
+            ret = f(ret, elem);
         }
         return ret;
-    }
+    };
 }
-// need vm support
-func partial_apply(f, x, ...) {
-    func ret(...) {
-        return f(x, ...);
-    }
-}
+

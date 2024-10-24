@@ -164,6 +164,7 @@ impl Vm {
             let pc = call_frame.pc;
             // dbg!(&instr);
             // dbg!(&stack);
+            // dbg!(&call_frame);
             // dbg!(self.global.last().unwrap());
 
             if self.debug {}
@@ -781,27 +782,43 @@ impl Vm {
                     let clct = stack.pop().unwrap();
                     match clct {
                         Value::Array(p_array) => {
-                            if let Value::Number(i) = idx {
-                                if i < 0. {
-                                    return Err(EvalError::IndexOutOfBound(self.eval_err_str(
-                                        "Array cannot be indexed by negative value",
+                            if va == 0 {
+                                if let Value::Number(i) = idx {
+                                    if i < 0. {
+                                        return Err(EvalError::IndexOutOfBound(self.eval_err_str(
+                                            "Array cannot be indexed by negative value",
+                                        )));
+                                    }
+                                    let i = i as usize;
+                                    let arr = unsafe { &mut *p_array };
+                                    if i >= arr.array.len() {
+                                        return Err(EvalError::IndexOutOfBound(
+                                            self.eval_err_str("index >= length of array"),
+                                        ));
+                                    } else {
+                                        let elem = arr.array.get(i).unwrap().clone();
+                                        stack.push(elem);
+                                        self.pc_add();
+                                    }
+                                } else {
+                                    return Err(EvalError::TypeError(
+                                        self.eval_err_str("Array can only be indexed by Number"),
+                                    ));
+                                }
+                            } else if va == 1 {
+                                // `methods` on Array
+                                stack.push(clct);
+                                if let Value::String(s) = idx {
+                                    let ext_name = self
+                                        .get_builtin_type_extension_name("Array", s.get_inner());
+                                    let ext_method = self.global.last().unwrap()[&ext_name].clone();
+                                    stack.push(ext_method);
+                                    self.pc_add();
+                                } else {
+                                    return Err(EvalError::TypeError(self.eval_err_str(
+                                        "Array. syntax is used to call extension methods on it.",
                                     )));
                                 }
-                                let i = i as usize;
-                                let arr = unsafe { &mut *p_array };
-                                if i >= arr.array.len() {
-                                    return Err(EvalError::IndexOutOfBound(
-                                        self.eval_err_str("index >= length of array"),
-                                    ));
-                                } else {
-                                    let elem = arr.array.get(i).unwrap().clone();
-                                    stack.push(elem);
-                                    self.pc_add();
-                                }
-                            } else {
-                                return Err(EvalError::TypeError(
-                                    self.eval_err_str("Array can only be indexed by Number"),
-                                ));
                             }
                         }
                         Value::Dictionary(p_dict) => {
@@ -1523,6 +1540,12 @@ impl Vm {
                 Instr::Nop => {
                     self.pc_add();
                 }
+                Instr::UnpackVA => {
+                    for elem in call_frame.va_args.iter() {
+                        stack.push(elem.clone());
+                    }
+                    self.pc_add();
+                }
                 i => {
                     return Err(EvalError::Error(
                         self.eval_err_str(format!("unknown instruction {i:?}").as_ref()),
@@ -1950,5 +1973,10 @@ impl Vm {
 
     pub fn set_fiber(&mut self, fiber: *mut Fiber) {
         self.executing_fiber = fiber;
+    }
+
+    fn get_builtin_type_extension_name(&mut self, variant: &str, name: &str) -> IString {
+        let s = format!("__{variant}_{name}__");
+        self.string_pool.creat_istring(&s)
     }
 }

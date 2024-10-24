@@ -378,7 +378,7 @@ impl<'a> ParserCtx<'a> {
     fn parse_argument(&mut self) -> Result<usize, String> {
         let mut argument_num = 0;
         let tok = self.peek_not_eof()?;
-        if Token::RParen == tok {
+        if Token::RParen == tok || Token::RBracket == tok{
             return Ok(0);
         }
         loop {
@@ -643,7 +643,7 @@ impl<'a> ParserCtx<'a> {
     }
 
     fn add_local(&mut self, symbol: &IString) -> Result<(), String> {
-        if self.depth == 0 && self.func_ctx_stack[self.depth].block_ctx_stack.len() == 1{
+        if self.depth == 0 && self.func_ctx_stack[self.depth].block_ctx_stack.len() == 1 {
             // outermost scope => Global
             let s = symbol.clone();
             self.exported_symbols.push(s);
@@ -989,9 +989,7 @@ impl<'a> ParserCtx<'a> {
                 Token::Is => {
                     self.emit_with_line(Instr::ClassIs, line);
                 }
-                _ => {
-                    return Err(self.parser_err_str("infix operator required here."))
-                }
+                _ => return Err(self.parser_err_str("infix operator required here.")),
             }
         }
         Ok(())
@@ -1206,7 +1204,6 @@ impl<'a> ParserCtx<'a> {
         } else {
             self.token_cood[self.ptr].0
         }
-        
     }
 }
 #[cfg(test)]
