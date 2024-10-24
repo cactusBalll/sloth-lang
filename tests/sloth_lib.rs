@@ -1,5 +1,10 @@
 extern crate sloth_lang_core;
-use sloth_lang_core::run_string;
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+use sloth_lang_core::{run_string, run_string_debug};
 
 #[test]
 fn func_tool() {
@@ -18,4 +23,23 @@ fn func_tool() {
     "#;
     let res = run_string(&src, false);
     println!("{res:?}");
+}
+
+#[test]
+fn brainfk() {
+    run_file("sloth/sloth_examples/brainfk.slt".into(), false);
+}
+
+fn run_file(path: PathBuf, debug: bool) {
+    let cwd = std::env::current_dir().unwrap();
+    let mut full_path = PathBuf::new();
+    full_path.push(&cwd);
+    full_path.push(&path);
+    let mut file = std::fs::File::open(full_path).unwrap();
+    let mut buffer = String::new();
+    file.read_to_string(&mut buffer).unwrap();
+    let res = run_string_debug(&buffer, false, debug);
+    if debug {
+        eprintln!("{res:?}");
+    }
 }

@@ -1,0 +1,121 @@
+
+var error = fiber.error;
+/*
+    wrapper around vec_u8
+    provide operator overriding
+*/
+class VecU8 {
+    func __init__(l) {
+        if (type_string(l) == "Number") {
+            this.inner = vec_u8.create(l);
+        } else {
+            this.inner = vec_u8.from_ascii_str(l);
+        }
+    }
+
+    func destory() {
+        vec_u8.destory(this.inner);
+    }
+
+    func __index__(idx) {
+        return vec_u8.get(this.inner, idx);
+    }
+
+    func __assign__(idx, val) {
+        vec_u8.set(this.inner, idx, val);
+    }
+
+    func len() {
+        return vec_u8.len(this.inner);
+    }
+}
+var TAPE_SIZE = 1024;
+
+func run() {
+    // tape for brainfk interpreter
+    var tape = VecU8(TAPE_SIZE);
+    var program = input();
+    print(program);
+    // program for brainfk interpreter
+    program = VecU8(program);
+    // length of program
+    var len = program.len();
+    var pc = 0;
+    // ptr to tape
+    var ptr = 512;
+
+    // stack for implementing `[` and `]`
+    var jump_back_points = [];
+    while (pc < len) {
+        var instr = program[pc];
+        if (instr == ord("<")) {
+            // <
+            if (ptr <= 0) {
+                print("ptr < 0");
+                error();
+            }
+            ptr = ptr - 1;
+            pc = pc + 1;
+        } else if (instr == ord(">")) {
+            // >
+            if (ptr >= TAPE_SIZE - 1) {
+                print("ptr >= TAPE_SIZE");
+                error();
+            }
+            ptr = ptr + 1;
+            pc = pc + 1;
+        } else if (instr == ord("+")) {
+            // +
+            tape[ptr] = tape[ptr] + 1;
+            pc = pc + 1;
+        } else if (instr == ord("-")) {
+            // -
+            tape[ptr] = tape[ptr] - 1;
+            pc = pc + 1;
+        } else if (instr == ord(".")) {
+            // .
+            print(chr(tape[ptr]));
+            pc = pc + 1;
+        } else if (instr == ord(",")) {
+            // ,
+            var c = input();
+            tape[ptr] = ord(c);
+            pc = pc + 1;
+        } else if (instr == ord("[")) {
+            // [
+            if (tape[ptr] == 0) {
+                // jump past MATCHING]
+                var open_bracket = 1;
+                while (open_bracket > 0) {
+                    pc = pc + 1;
+                    if (program[pc] == ord("[")) {
+                        open_bracket = open_bracket + 1;
+                    }
+                    if (program[pc] == ord("]")) {
+                        open_bracket = open_bracket - 1;
+                    }
+                }
+            } else {
+                jump_back_points.push(pc);
+            }
+            pc = pc + 1;
+        } else if (instr == ord("]")) {
+            // ]
+            if (tape[ptr] != 0) {
+                pc = jump_back_points.pop();
+            } else {
+                jump_back_points.pop();
+                pc = pc + 1;
+            }
+        } else {
+            print("not valid brainfk program.");
+            error();
+        }
+    }
+
+    // memory of vec_u8 should be managed manually
+    tape.destory();
+    program.destory();
+}
+
+run();

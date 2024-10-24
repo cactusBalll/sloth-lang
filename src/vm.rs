@@ -67,7 +67,7 @@ pub struct Vm {
 pub struct CallFrame {
     bottom: usize,
     pub closure: *mut Closure,
-    pc: usize,
+    pub pc: usize,
 
     pub va_args: Vec<Value>,
 
@@ -162,12 +162,12 @@ impl Vm {
             let mut stack = unsafe { &mut (*self.executing_fiber).stack };
             let instr = unsafe { (*(*call_frame.closure).chunk).bytecodes[call_frame.pc] };
             let pc = call_frame.pc;
-            // dbg!(&instr);
-            // dbg!(&stack);
-            // dbg!(&call_frame);
-            // dbg!(self.global.last().unwrap());
-
-            if self.debug {}
+            if self.debug {
+                dbg!(&instr);
+                dbg!(&stack);
+                dbg!(&call_frame);
+                // dbg!(self.global.last().unwrap());
+            }
             match instr {
                 Instr::Add => {
                     let opr2 = stack.pop().unwrap();
@@ -535,22 +535,30 @@ impl Vm {
                     }
                 }
                 Instr::Gt => {
-                    self.binary_predicate_impl(|x, y| x > y, "__gt__")?;
+                    self.binary_predicate_impl(|x, y| x > y, |s1, s2| s1 > s2, "__gt__")?;
                 }
                 Instr::Lt => {
-                    self.binary_predicate_impl(|x, y| x < y, "__lt__")?;
+                    self.binary_predicate_impl(|x, y| x < y, |s1, s2| s1 < s2, "__lt__")?;
                 }
                 Instr::Ge => {
-                    self.binary_predicate_impl(|x, y| x >= y, "__ge__")?;
+                    self.binary_predicate_impl(|x, y| x >= y, |s1, s2| s1 >= s2, "__ge__")?;
                 }
                 Instr::Le => {
-                    self.binary_predicate_impl(|x, y| x <= y, "__le__")?;
+                    self.binary_predicate_impl(|x, y| x <= y, |s1, s2| s1 <= s2, "__le__")?;
                 }
                 Instr::Eq => {
-                    self.binary_predicate_impl(|x, y| (x - y).abs() < 1e-5, "__eq__")?;
+                    self.binary_predicate_impl(
+                        |x, y| (x - y).abs() < 1e-5,
+                        |s1, s2| s1 == s2,
+                        "__eq__",
+                    )?;
                 }
                 Instr::Ne => {
-                    self.binary_predicate_impl(|x, y| (x - y).abs() >= 1e-5, "__ne__")?;
+                    self.binary_predicate_impl(
+                        |x, y| (x - y).abs() >= 1e-5,
+                        |s1, s2| s1 != s2,
+                        "__ne__",
+                    )?;
                 }
                 Instr::Not => {
                     let opr1 = self.get_stack().pop().unwrap();
@@ -1558,6 +1566,7 @@ impl Vm {
     fn binary_predicate_impl(
         &mut self,
         op: fn(f64, f64) -> bool,
+        op_str: fn(&str, &str) -> bool,
         op_name: &str,
     ) -> Result<(), EvalError> {
         let opr2 = self.get_stack().pop().unwrap();
@@ -1566,6 +1575,17 @@ impl Vm {
             Value::Number(a) => {
                 if let Value::Number(b) = opr2 {
                     let res = op(a, b);
+                    self.get_stack().push(Value::Bool(res));
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("unsupported comparing operation"),
+                    ));
+                }
+                self.pc_add();
+            }
+            Value::String(s1) => {
+                if let Value::String(s2) = opr2 {
+                    let res = op_str(s1.get_inner(), s2.get_inner());
                     self.get_stack().push(Value::Bool(res));
                 } else {
                     return Err(EvalError::TypeError(
@@ -1978,5 +1998,9 @@ impl Vm {
     fn get_builtin_type_extension_name(&mut self, variant: &str, name: &str) -> IString {
         let s = format!("__{variant}_{name}__");
         self.string_pool.creat_istring(&s)
+    }
+
+    pub fn get_current_glob(&mut self) -> &mut HashMap<IString, Value> {
+        self.global.last_mut().unwrap()
     }
 }

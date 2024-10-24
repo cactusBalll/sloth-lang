@@ -12,7 +12,7 @@ macro_rules! arity_assert {
         }
     };
 }
-// initial -> waiting -> paused -> 
+// initial -> waiting -> paused ->
 // I don't know if fiber should be allowed to refer to value on the stack.
 // for now the behavior is undefined if a closure refering to unclosed upvalue
 // is called in another fiber.
@@ -34,7 +34,7 @@ pub fn sloth_fiber_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
     unsafe {
         for upv_obj in (*p_closure).upvalues.iter() {
             match &(**upv_obj).value {
-                crate::UpValue::Closed(_value) => {},
+                crate::UpValue::Closed(_value) => {}
                 crate::UpValue::Ref(_) => {
                     panic!("closure refering to unclosed UpValue CANNOT be used to create Fiber.");
                 }
@@ -45,7 +45,7 @@ pub fn sloth_fiber_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // bind arguments
     let mut packed_va_list = Vec::new();
     let chunk = unsafe { &*(*p_closure).chunk };
-    
+
     if chunk.parameter_num != arg_cnt {
         if chunk.parameter_num < arg_cnt && chunk.is_va {
             for idx in chunk.parameter_num..args.len() {
@@ -89,7 +89,7 @@ pub fn sloth_fiber_resume(vm: &mut Vm, arg_num: usize, _protected: bool) {
     };
     let _ = vm.get_stack().pop();
     unsafe {
-        if (*fiber).state != FiberState::Paused && (*fiber).state != FiberState::Initial{
+        if (*fiber).state != FiberState::Paused && (*fiber).state != FiberState::Initial {
             panic!("ONLY Fiber in Paused Or Initial State can be resume.");
         }
         (*vm.get_current_fiber()).state = FiberState::Waiting;
@@ -102,7 +102,6 @@ pub fn sloth_fiber_resume(vm: &mut Vm, arg_num: usize, _protected: bool) {
         }
         (*fiber).state = FiberState::Running;
         vm.set_fiber(fiber);
-        
     }
 }
 
@@ -122,7 +121,6 @@ pub fn sloth_fiber_yield(vm: &mut Vm, arg_num: usize, _protected: bool) {
         (*prev).stack.push(pass_val);
         (*prev).state = FiberState::Running;
         vm.set_fiber(prev);
-
     }
 }
 
@@ -135,7 +133,7 @@ pub fn sloth_fiber_transfer(vm: &mut Vm, arg_num: usize, _protected: bool) {
     };
     let _ = vm.get_stack().pop();
     unsafe {
-        if (*fiber).state != FiberState::Paused && (*fiber).state != FiberState::Initial{
+        if (*fiber).state != FiberState::Paused && (*fiber).state != FiberState::Initial {
             panic!("ONLY Fiber in Paused Or Initial State can be transfered to.");
         }
         (*vm.get_current_fiber()).state = FiberState::Paused;
@@ -147,9 +145,7 @@ pub fn sloth_fiber_transfer(vm: &mut Vm, arg_num: usize, _protected: bool) {
         }
         (*fiber).state = FiberState::Running;
         vm.set_fiber(fiber);
-        
     }
-
 }
 pub fn sloth_fiber_set_error(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let _ = vm.get_stack().pop();
@@ -157,6 +153,11 @@ pub fn sloth_fiber_set_error(vm: &mut Vm, arg_num: usize, _protected: bool) {
         (*vm.get_current_fiber()).state = FiberState::Error;
         let prev = (*vm.get_current_fiber()).prev;
         if prev == null_mut() {
+            eprintln!("stack: {:?}", vm.get_stack());
+            eprintln!("call_frame: {:?}", vm.get_call_frame());
+            let pc = vm.get_call_frame().pc;
+            let instr = (*(*vm.get_call_frame().closure).chunk).bytecodes[pc];
+            eprintln!("instr: {:?}", instr);
             panic!("fiber error occured but nowhere to go.");
         }
         (*prev).state = FiberState::Running;

@@ -135,104 +135,108 @@ impl<'a> ParserCtx<'a> {
                 return Err("incomplete program".to_owned());
             }
         }
-        self.parse()?;
+        loop {
+            if self.peek() == None {
+                break;
+            }
+            self.parse()?;
+        }
         self.emit(Instr::Return);
         Ok(())
     }
     fn parse(&mut self) -> Result<(), String> {
-        loop {
-            let tok = if let Some(tok) = self.peek() {
-                dbg!(tok)
-            } else {
-                return Ok(());
-            };
-            match tok {
-                Token::Break => {
-                    if !self.func_ctx_stack.last().unwrap().loop_ctx {
-                        return Err(self.parser_err_str("break can ONLY be used inside loops"));
-                    } else {
-                        self.advance();
-                        self.advance();
-                        self.emit(Instr::Nop);
-                        self.func_ctx_stack
-                            .last_mut()
-                            .unwrap()
-                            .loop_ctx_stack
-                            .last_mut()
-                            .unwrap()
-                            .break_patch_point
-                            .push(self.chunk[self.depth].bytecodes.len());
-                    }
-                }
-                Token::Continue => {
-                    if !self.func_ctx_stack.last().unwrap().loop_ctx {
-                        return Err(self.parser_err_str("continue can ONLY be used inside loops"));
-                    } else {
-                        self.advance();
-                        self.advance();
-                        self.emit(Instr::Nop);
-                        self.func_ctx_stack
-                            .last_mut()
-                            .unwrap()
-                            .loop_ctx_stack
-                            .last_mut()
-                            .unwrap()
-                            .continue_patch_point
-                            .push(self.chunk[self.depth].bytecodes.len());
-                    }
-                }
-                Token::Var => {
-                    self.parse_decl()?;
-                }
-                Token::LBrace => {
-                    self.parse_block()?;
-                }
-                Token::If => {
-                    self.parse_if()?;
-                }
-                Token::While => {
-                    self.parse_while()?;
-                }
-                Token::For => {
-                    self.parse_for()?;
-                }
-                Token::Function => {
-                    self.parse_func_decl()?;
-                }
-                Token::Return => {
-                    self.parse_return()?;
-                }
-                Token::Symbol(_) => {
-                    self.parse_assign_or_rval_expr()?;
-                    // self.emit(Instr::Pop);
-                    self.consume(Token::Semicolon)?;
-                }
-                Token::Class => {
-                    self.parse_class_decl()?;
-                }
-
-                Token::LBracket
-                | Token::LParen
-                | Token::Dict
-                | Token::Number(_)
-                | Token::String(_)
-                | Token::True
-                | Token::False
-                | Token::Not
-                | Token::Nil
-                | Token::Sub
-                | Token::Super
-                | Token::This => {
-                    self.parse_rval_expr(PrattPrecedence::Lowest)?;
-                    self.emit(Instr::Pop);
-                    self.consume(Token::Semicolon)?;
-                }
-                Token::RBrace => return Ok(()),
-                tk => {
-                    return Err(self.parser_err_str(format!("unexpected token {tk:?}").as_ref()));
+        let tok = if let Some(tok) = self.peek() {
+            tok
+        } else {
+            return Ok(());
+        };
+        match tok {
+            Token::Break => {
+                if !self.func_ctx_stack.last().unwrap().loop_ctx {
+                    return Err(self.parser_err_str("break can ONLY be used inside loops"));
+                } else {
+                    self.advance();
+                    self.advance();
+                    self.emit(Instr::Nop);
+                    self.func_ctx_stack
+                        .last_mut()
+                        .unwrap()
+                        .loop_ctx_stack
+                        .last_mut()
+                        .unwrap()
+                        .break_patch_point
+                        .push(self.chunk[self.depth].bytecodes.len());
                 }
             }
+            Token::Continue => {
+                if !self.func_ctx_stack.last().unwrap().loop_ctx {
+                    return Err(self.parser_err_str("continue can ONLY be used inside loops"));
+                } else {
+                    self.advance();
+                    self.advance();
+                    self.emit(Instr::Nop);
+                    self.func_ctx_stack
+                        .last_mut()
+                        .unwrap()
+                        .loop_ctx_stack
+                        .last_mut()
+                        .unwrap()
+                        .continue_patch_point
+                        .push(self.chunk[self.depth].bytecodes.len());
+                }
+            }
+            Token::Var => {
+                self.parse_decl()?;
+            }
+            Token::LBrace => {
+                self.parse_block()?;
+            }
+            Token::If => {
+                self.parse_if()?;
+            }
+            Token::While => {
+                self.parse_while()?;
+            }
+            Token::For => {
+                self.parse_for()?;
+            }
+            Token::Function => {
+                self.parse_func_decl()?;
+            }
+            Token::Return => {
+                self.parse_return()?;
+            }
+            Token::Symbol(_) => {
+                self.parse_assign_or_rval_expr()?;
+                // self.emit(Instr::Pop);
+                self.consume(Token::Semicolon)?;
+            }
+            Token::Class => {
+                self.parse_class_decl()?;
+            }
+
+            Token::LBracket
+            | Token::LParen
+            | Token::Dict
+            | Token::Number(_)
+            | Token::String(_)
+            | Token::True
+            | Token::False
+            | Token::Not
+            | Token::Nil
+            | Token::Sub
+            | Token::Super
+            | Token::This => {
+                self.parse_rval_expr(PrattPrecedence::Lowest)?;
+                self.emit(Instr::Pop);
+                self.consume(Token::Semicolon)?;
+            }
+            Token::RBrace => return Ok(()),
+            tk => {
+                return Err(self.parser_err_str(format!("unexpected token {tk:?}").as_ref()));
+            }
         }
+        Ok(())
     }
     fn parse_class_decl(&mut self) -> Result<(), String> {
         self.advance();
@@ -295,7 +299,7 @@ impl<'a> ParserCtx<'a> {
             }
             self.consume(Token::RParen)?;
             self.consume(Token::LBrace)?;
-            self.parse()?;
+            self.parse_stmt_list()?;
             if method_name.get_inner() == "__init__" {
                 // __init__() method implicitly return this
                 self.emit(Instr::GetThis);
@@ -340,7 +344,7 @@ impl<'a> ParserCtx<'a> {
         // self.emit(Instr::Pop);
 
         self.consume(Token::LBrace)?;
-        self.parse()?;
+        self.parse_stmt_list()?;
         self.consume(Token::RBrace)?;
         self.emit(Instr::Jump(
             loop_start_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
@@ -378,7 +382,7 @@ impl<'a> ParserCtx<'a> {
     fn parse_argument(&mut self) -> Result<usize, String> {
         let mut argument_num = 0;
         let tok = self.peek_not_eof()?;
-        if Token::RParen == tok || Token::RBracket == tok{
+        if Token::RParen == tok || Token::RBracket == tok {
             return Ok(0);
         }
         loop {
@@ -474,7 +478,7 @@ impl<'a> ParserCtx<'a> {
         }
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
-        self.parse()?;
+        self.parse_stmt_list()?;
         self.consume(Token::RBrace)?;
         let mut chunk = self.close_env();
         chunk.parameter_num = para_num;
@@ -528,7 +532,7 @@ impl<'a> ParserCtx<'a> {
             .unwrap()
             .loop_ctx_stack
             .push(LoopCtx::default());
-        self.parse()?;
+        self.parse_stmt_list()?;
         let cur_loop_ctx = self
             .func_ctx_stack
             .last_mut()
@@ -560,12 +564,28 @@ impl<'a> ParserCtx<'a> {
     fn parse_block(&mut self) -> Result<(), String> {
         self.consume(Token::LBrace)?;
         self.open_block();
-        self.parse()?;
-
+        loop {
+            let tk = self.peek_not_eof()?;
+            if tk == Token::RBrace {
+                break;
+            }
+            self.parse()?;
+        }
         self.close_block();
         self.consume(Token::RBrace)?;
         Ok(())
     }
+
+    fn parse_stmt_list(&mut self) -> Result<(), String> {
+        loop {
+            let tk = self.peek_not_eof()?;
+            if tk == Token::RBrace {
+                break;
+            }
+            self.parse()?;
+        }
+        Ok(())
+    } 
     fn parse_if(&mut self) -> Result<(), String> {
         self.consume(Token::If)?;
         self.consume(Token::LParen)?;
@@ -576,8 +596,8 @@ impl<'a> ParserCtx<'a> {
         // pop the bool value
         self.emit(Instr::Pop);
         self.consume(Token::RParen)?;
-        self.consume(Token::LBrace)?;
-        self.open_block();
+        // self.consume(Token::LBrace)?;
+        // self.open_block();
         self.parse()?;
         let patch_point2 = self.chunk[self.depth].bytecodes.len();
         // pop the bool value
@@ -585,18 +605,15 @@ impl<'a> ParserCtx<'a> {
         // emit an empty slot, jump to end of if statement, but we still don't know if there
         // is an else clause, Jump(0) is just nop.
         self.emit(Instr::Jump(0));
-        self.close_block();
-        self.consume(Token::RBrace)?;
+        // self.close_block();
+        // self.consume(Token::RBrace)?;
         self.chunk[self.depth].bytecodes[patch_point] =
             Instr::JumpIfNot((self.chunk[self.depth].bytecodes.len() - patch_point) as i32);
+        self.emit(Instr::Pop);
         if let Some(tok) = self.peek() {
             if Token::Else == tok {
                 self.advance();
-                self.consume(Token::LBrace)?;
-                self.open_block();
                 self.parse()?;
-                self.close_block();
-                self.consume(Token::RBrace)?;
                 self.chunk[self.depth].bytecodes[patch_point2] =
                     Instr::Jump((self.chunk[self.depth].bytecodes.len() - patch_point2) as i32);
             }
@@ -812,6 +829,7 @@ impl<'a> ParserCtx<'a> {
                 }
                 Token::Nil => {
                     self.emit(Instr::PushNil);
+                    self.advance();
                 }
 
                 Token::LBracket => {
@@ -861,7 +879,7 @@ impl<'a> ParserCtx<'a> {
                     }
                     self.consume(Token::Stick)?;
                     self.consume(Token::LBrace)?;
-                    self.parse()?;
+                    self.parse_stmt_list()?;
                     self.consume(Token::RBrace)?;
                     let mut chunk = self.close_env();
                     chunk.parameter_num = para_num;
@@ -1147,7 +1165,7 @@ impl<'a> ParserCtx<'a> {
     }
 
     fn resolve(&mut self, symbol: &IString, depth: usize) -> VarLoc {
-        if dbg!(symbol.get_inner()) == "this" {
+        if symbol.get_inner() == "this" {
             if !self.method_ctx {
                 return VarLoc::NotFound;
             }

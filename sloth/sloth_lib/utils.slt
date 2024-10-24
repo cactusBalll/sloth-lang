@@ -1,0 +1,4 @@
+func import_glob(s) {
+    var m = import(s);
+    as_glob(m);
+} 

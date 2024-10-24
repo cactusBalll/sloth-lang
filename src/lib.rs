@@ -15,8 +15,8 @@ use compiler::parser::{self, ParserCtx};
 use compiler::scanner::{self, ScannerCtx};
 use interned_string::{IString, StringPool};
 use native::{
-    sloth_input, sloth_load_module, sloth_print_val, sloth_to_bool, sloth_to_number,
-    sloth_to_string, sloth_typeof, sloth_va_arg,
+    sloth_add_glob, sloth_chr, sloth_input, sloth_load_module, sloth_ord, sloth_print_val,
+    sloth_to_bool, sloth_to_number, sloth_to_string, sloth_typeof, sloth_va_arg,
 };
 use vm::{CallFrame, Vm};
 
@@ -60,30 +60,45 @@ pub fn prelude() -> Vec<(String, Value)> {
             Value::NativeFunction(sloth_va_arg as *mut u8),
         ),
         mf_entry!("__Array_push__", extension_methods::array_push),
+        mf_entry!("__Array_pop__", extension_methods::array_pop),
+        mf_entry!("as_glob", sloth_add_glob),
+        mf_entry!("ord", sloth_ord),
+        mf_entry!("chr", sloth_chr),
     ]
 }
 pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
+    run_string_debug(prog, only_compile, false)
+}
+pub fn run_string_debug(prog: &str, only_compile: bool, debug: bool) -> Result<(), String> {
     let mut string_pool = StringPool::new();
     let mut scanner = ScannerCtx::new(prog, &mut string_pool);
     scanner.parse()?;
     let scanner_result = scanner.finish();
-    println!("{:?}", scanner_result.tokens);
+    if debug {
+        eprintln!("{:?}", scanner_result.tokens);
+    }
     let mut parser = ParserCtx::new(scanner_result, HashMap::new(), &mut string_pool);
     parser.parse_prog()?;
     let parser_result = parser.finish();
-    println!("{:?}", parser_result.chunk);
+    if debug {
+        eprintln!("{:?}", parser_result.chunk);
+    }
     let _ = std::io::stdout().flush();
     let cwd = std::env::current_dir().unwrap();
-    println!("interpreter running in {cwd:?}");
+    if debug {
+        eprintln!("interpreter running in {cwd:?}");
+    }
     let mut vm = Box::new(Vm::new(
         parser_result.chunk,
         HashMap::new(),
         string_pool,
-        true,
+        debug,
         cwd,
     ));
     vm.load_native_module(None, prelude());
     let (name, module) = fiber::module_export();
+    vm.load_native_module(Some(&name), module);
+    let (name, module) = vec::module_export();
     vm.load_native_module(Some(&name), module);
     if !only_compile {
         vm.run()?;

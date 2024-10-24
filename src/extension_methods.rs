@@ -31,3 +31,19 @@ pub fn array_push(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
     vm.get_stack().push(Value::Nil);
 }
+
+pub fn array_pop(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(0, arg_num);
+    let _ = vm.get_stack().pop();
+    // Array is hided under me
+    let clct = vm.get_stack().pop().unwrap();
+
+    if let Value::Array(p_arr) = clct {
+        unsafe {
+            let v = (*p_arr).array.pop().unwrap();
+            vm.get_stack().push(v);
+        }
+    } else {
+        panic!("`array_push` can ONLY push to Array.");
+    }
+}

@@ -7,6 +7,21 @@ use std::{
     io::{self, Read},
 };
 
+
+macro_rules! arity_assert {
+    ($n:expr, $arg_num:expr) => {
+        if $arg_num != $n {
+            panic!("arity check failed, passed {}, required {}", $n, $arg_num);
+        }
+    };
+}
+
+macro_rules! mf_entry {
+    ($name:expr,$func:expr) => {
+        ($name.to_owned(), Value::NativeFunction($func as *mut u8))
+    };
+}
+
 pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
     let val = vm.get_stack().pop().unwrap_or(Value::Nil);
     macro_rules! vstr {
@@ -31,6 +46,23 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
         _ => vstr!("..."),
     };
     vm.get_stack().push(Value::String(v));
+}
+
+pub fn sloth_add_glob(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    // add all kv to Global
+    arity_assert!(1, arg_num);
+    let p_dict = if let Value::Dictionary(p_dict) = vm.get_stack().pop().unwrap() {
+        p_dict
+    } else {
+        panic!("add_glob take 1 argument: dict: Dict");
+    };
+    let _ = vm.get_stack().pop();
+    unsafe {
+        for (k,v) in (*p_dict).dict.iter() {
+            vm.get_current_glob().insert(k.clone(), v.clone());
+        }
+    }
+    vm.get_stack().push(Value::Nil);
 }
 
 pub fn sloth_load_module(vm: &mut Vm, arg_num: usize, _protected: bool) {
@@ -76,7 +108,7 @@ pub fn sloth_input(vm: &mut Vm, _arg_num: usize, _protected: bool) {
     let mut buffer = String::new();
     // blocking...
     let _ = io::stdin().read_line(&mut buffer);
-    let istring = vm.make_managed_string(&buffer);
+    let istring = vm.make_managed_string(buffer.trim());
     vm.get_stack().push(Value::String(istring));
 }
 
@@ -139,6 +171,41 @@ pub fn sloth_va_arg(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Array(p_array));
 }
 
+
+pub fn sloth_ord(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(1, arg_num);
+    let s = if let Value::String(s) = vm.get_stack().pop().unwrap() {
+        s
+    } else {
+        panic!("ord take 1 argument: s: String.");
+    };
+    let _ = vm.get_stack().pop();
+
+    if s.get_inner().len() != 1{
+        panic!("ord(s): s should contains exactly **1** char.")
+    }
+    let val = s.get_inner().chars().next().unwrap();
+    vm.get_stack().push(Value::Number(val as usize as f64));
+}
+
+pub fn sloth_chr(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(1, arg_num);
+    let v = if let Value::Number(v) = vm.get_stack().pop().unwrap() {
+        v
+    } else {
+        panic!("chr take 1 argument: v: Number.");
+    };
+    let _ = vm.get_stack().pop();
+
+    if let Some(c) = std::char::from_u32(v as u32) {
+        let mut s = String::new();
+        s.push(c);
+        let s = vm.make_managed_string(&s);
+        vm.get_stack().push(Value::String(s));
+    } else {
+        panic!("chr(): not a valid unicode codepoint.");
+    }
+}
 fn write_val(buffer: &mut String, val: &Value, visited_loc: &mut HashSet<*mut u8>) -> fmt::Result {
     match val {
         Value::Nil => {

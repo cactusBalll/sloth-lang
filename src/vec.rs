@@ -85,7 +85,21 @@ pub fn vec_u8_get(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-
+pub fn vec_u8_len(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(1, arg_num);
+    let clct = if let Value::OpaqueData(clct) = vm.get_stack().pop().unwrap() {
+        clct
+    } else {
+        panic!("vec_u8_len take 1 parameter: clct:OpaqueData.")
+    };
+    let _ = vm.get_stack().pop();
+    let clct = clct as *mut Vec<u8>;
+    unsafe {
+        
+        let val = (*clct).len();
+        vm.get_stack().push(Value::Number(val as f64));
+    }
+}
 pub fn vec_u8_destroy(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
     let clct = if let Value::OpaqueData(clct) = vm.get_stack().pop().unwrap() {
@@ -103,6 +117,29 @@ pub fn vec_u8_destroy(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
+pub fn vec_u8_from_ascii_string(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(1, arg_num);
+    let s = if let Value::String(s) = vm.get_stack().pop().unwrap() {
+        s
+    } else {
+        panic!("from_ascii_str take 1 argument: s: String.");
+    };
+    let _ = vm.get_stack().pop();
+    let mut vec = Vec::new();
+    for c in s.get_inner().chars() {
+        if c.is_ascii() {
+            vec.push(c as u8);
+        } else {
+            panic!("String contain non-ascii characters.")
+        }
+    }
+
+    let b_vec = Box::new(vec);
+    // sloth guest program should manage it
+    let p_vec = Box::into_raw(b_vec);
+    vm.get_stack().push(Value::OpaqueData(p_vec as *mut u8));
+
+}
 pub fn module_export() -> (String, Vec<(String, Value)>) {
     let module_name = "vec_u8".to_owned();
     let module_func = vec![
@@ -110,6 +147,8 @@ pub fn module_export() -> (String, Vec<(String, Value)>) {
         mf_entry!("get", vec_u8_get),
         mf_entry!("set", vec_u8_set),
         mf_entry!("destory", vec_u8_destroy),
+        mf_entry!("from_ascii_str", vec_u8_from_ascii_string),
+        mf_entry!("len", vec_u8_len),
     ];
 
     (module_name, module_func)
