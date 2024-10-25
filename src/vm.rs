@@ -2021,4 +2021,12 @@ impl Vm {
         }
     }
 
+    pub fn gets_opaque(&mut self) -> *mut u8 {
+        if let Value::OpaqueData(v) = self.get_stack().pop().unwrap() {
+            v
+        } else {
+            panic!("not an OpaqueData");
+        }
+    }
+
 }

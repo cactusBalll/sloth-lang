@@ -1,0 +1,10 @@
+// builtin module draw
+
+var draw_ctx = draw.create(720, 480, "Game Of Life", 10);
+
+
+while (not draw.should_close(draw_ctx)) {
+    draw.render(draw_ctx);
+}
+
+draw.destory(draw_ctx);

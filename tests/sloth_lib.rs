@@ -29,6 +29,10 @@ fn func_tool() {
 fn brainfk() {
     run_file("sloth/sloth_examples/brainfk.slt".into(), false);
 }
+#[test]
+fn game_of_life() {
+    run_file("sloth/sloth_examples/game_of_life.slt".into(), false);
+}
 
 fn run_file(path: PathBuf, debug: bool) {
     let cwd = std::env::current_dir().unwrap();

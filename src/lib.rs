@@ -101,6 +101,9 @@ pub fn run_string_debug(prog: &str, only_compile: bool, debug: bool) -> Result<(
     vm.load_native_module(Some(&name), module);
     let (name, module) = vec::module_export();
     vm.load_native_module(Some(&name), module);
+    let (name, module) = draw::module_export();
+    vm.load_native_module(Some(&name), module);
+
     if !only_compile {
         vm.run()?;
     }
