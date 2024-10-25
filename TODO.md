@@ -19,6 +19,7 @@
 - **类型强制** done
 - **重构Fiber** done
 - `__array_push__([], 1) <-> [].push(1)` 内置类型点语法调用
+- 字符串插值 `"{}, world"` -> `string() + ", world"`
 - ~~`...`在栈上展开参数~~
 ## tier-2 TODO
 - better error system

@@ -2003,4 +2003,22 @@ impl Vm {
     pub fn get_current_glob(&mut self) -> &mut HashMap<IString, Value> {
         self.global.last_mut().unwrap()
     }
+
+    // stack utils
+    pub fn gets_number(&mut self) -> f64 {
+        if let Value::Number(v) = self.get_stack().pop().unwrap() {
+            v
+        } else {
+            panic!("not a Number");
+        }
+    }
+
+    pub fn gets_string(&mut self) -> IString {
+        if let Value::String(v) = self.get_stack().pop().unwrap() {
+            v.clone()
+        } else {
+            panic!("not a Number");
+        }
+    }
+
 }

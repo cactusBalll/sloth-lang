@@ -6,6 +6,7 @@ pub struct ScannerCtx<'a> {
     pub tokens: Vec<Token>,
     pub cood: Vec<(usize, usize)>, // row & col
     pub string_pool: &'a mut StringPool,
+    unclosed_brace: Vec<usize>,
     ptr: usize,
     row: usize,
     col: usize,
@@ -28,6 +29,7 @@ impl<'a> ScannerCtx<'a> {
             tokens: Vec::new(),
             cood: Vec::new(),
             string_pool: string_pool,
+            unclosed_brace: Vec::new(),
             ptr: 0,
             row: 1,
             col: 1,
@@ -102,7 +104,7 @@ impl<'a> ScannerCtx<'a> {
                         }
                     }
                 }
-                c if {c == '/' && self.peekn(2) == Some('*') } => {
+                c if { c == '/' && self.peekn(2) == Some('*') } => {
                     self.advance()?;
                     self.advance()?;
                     while let Some(comment_c) = self.peek() {
@@ -210,6 +212,15 @@ impl<'a> ScannerCtx<'a> {
                         }
                     }
                     if let Some(t) = single_punct_map.get(&c) {
+                        if !self.unclosed_brace.is_empty() && c == '{' {
+                            *self.unclosed_brace.last_mut().unwrap() += 1;
+                        } else if !self.unclosed_brace.is_empty() && c == '}' {
+                            let cnt = self.unclosed_brace.last_mut().unwrap();
+                            *cnt -= 1;
+                            if cnt == &0 {
+                                return Ok(());
+                            }
+                        }
                         self.tokens.push(t.clone());
                         self.record_pos();
                         self.advance()?;
@@ -298,7 +309,7 @@ impl<'a> ScannerCtx<'a> {
             let c = self.peek();
             match c {
                 Some(c) => {
-                    if c.is_ascii_digit(){
+                    if c.is_ascii_digit() {
                         ret.push(c);
                         self.advance()?;
                     } else if c == '.' {
@@ -309,7 +320,7 @@ impl<'a> ScannerCtx<'a> {
                         }
                         ret.push(c);
                         self.advance()?;
-                    }else {
+                    } else {
                         break;
                     }
                 }
@@ -334,6 +345,33 @@ impl<'a> ScannerCtx<'a> {
                     if c == '\"' {
                         self.advance()?;
                         break;
+                    } else if c == '$' {
+                        self.advance()?;
+                        self.consume('{')?;
+                        // s before ${}
+                        let s_before = self.string_pool.creat_istring(&ret);
+                        ret.clear();
+                        self.tokens.push(Token::String(s_before));
+                        self.record_pos();
+                        // +
+                        self.tokens.push(Token::Add);
+                        self.record_pos();
+                        //${
+                        self.tokens.push(Token::InterplotBegin);
+                        self.record_pos();
+
+                        self.unclosed_brace.push(1);
+                        self.parse()?;
+                        self.unclosed_brace.pop();
+                        self.consume('}')?;
+
+                        //}
+                        self.tokens.push(Token::InterplotEnd);
+                        self.record_pos();
+
+                        // +
+                        self.tokens.push(Token::Add);
+                        self.record_pos();
                     } else if c == '\\' {
                         // escaped character
                         if let Some(ahead) = self.peekn(2) {
@@ -344,6 +382,9 @@ impl<'a> ScannerCtx<'a> {
                                 't' => '\t',
                                 'r' => '\r',
                                 '\\' => '\\',
+                                '$' => '$',
+                                '{' => '{',
+                                '}' => '}',
                                 _ => {
                                     return Err(
                                         self.scanner_err_str("unsupported escaped character")
@@ -372,6 +413,4 @@ impl<'a> ScannerCtx<'a> {
     }
 }
 #[cfg(test)]
-mod test {
-    
-}
+mod test {}

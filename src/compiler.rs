@@ -75,6 +75,9 @@ pub enum Token {
     Dots,     //..
     DotsEq,   //..=
     ThreeDots, //...
+
+    InterplotBegin, // special token ${
+    InterplotEnd,   // special token }
 }
 
 impl Token {

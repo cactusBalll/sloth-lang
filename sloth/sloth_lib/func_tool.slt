@@ -2,7 +2,6 @@ func map(f) {
     return |it| {
         var ret = [];
         for (var elem: it) {
-            // need modify
             // ret = ret + [f(elem)];
             ret.push(f(elem));
         }

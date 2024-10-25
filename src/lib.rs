@@ -5,6 +5,7 @@ mod fiber;
 mod interned_string;
 mod native;
 mod vec;
+mod draw;
 mod vm;
 
 use std::collections::HashMap;
@@ -514,6 +515,8 @@ pub enum Instr {
 type NativeFunction = fn(&mut Vm, usize, bool);
 #[cfg(test)]
 mod test {
+    use crate::run_string_debug;
+
     use super::run_string;
     #[test]
     fn pipe_test() {
@@ -818,12 +821,31 @@ mod test {
     }
 
     #[test]
-    fn minimal() {
+    fn str_interp0() {
         let src = r#"
-            print("233")
-            print("114514");
+            var name = "Curry";
+            print("hello ${name}");
         "#;
-        let res = run_string(&src, true);
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn str_interp1() {
+        let src = r#"
+            var name = "Curry";
+            print("hello ${||{return string([1,2,3,4,5]);}()}");
+        "#;
+        let res = run_string_debug(&src, false, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn str_interp2() {  
+        let src = r#"
+            var name = "Curry";
+            print("hello ${||{return "${[1,2,3,4,5]}";}()}");
+        "#;
+        let res = run_string_debug(&src, false, false);
         println!("{res:?}");
     }
 }

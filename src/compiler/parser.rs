@@ -855,6 +855,17 @@ impl<'a> ParserCtx<'a> {
                     self.parse_rval_expr(PrattPrecedence::Lowest)?;
                     self.consume(Token::RParen)?;
                 }
+                Token::InterplotBegin => {
+                    self.advance();
+                    // require builtin string function
+                    let f = self.string_pool.creat_istring("string");
+                    self.emit_get_symbol(&f, self.get_line())?;
+
+                    self.parse_rval_expr(PrattPrecedence::Lowest)?;
+                    self.consume(Token::InterplotEnd)?;
+                    // stack: [builtin string()] [rval value]
+                    self.emit(Instr::Call(1));
+                }
                 Token::Stick => {
                     // lambda
                     self.advance();
