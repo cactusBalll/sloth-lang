@@ -426,6 +426,7 @@ impl Debug for Chunk {
         for i in 0..(self.bytecodes.len()) {
             writeln!(f, "{:>15}   {:?}", self.lines[i], self.bytecodes[i])?;
         }
+        writeln!(f, "num_locals: {:?}", self.num_locals)?;
         writeln!(f, "constants: {:?}", self.constants)?;
         writeln!(f, "upvalues: {:?}", self.upvalues)?;
         writeln!(f, "chunks: {:?}", self.chunks)?;
@@ -635,7 +636,7 @@ mod test {
             }
         }
         "#;
-        let res = run_string(&src, false);
+        let res = run_string_debug(&src, false, false);
         println!("{res:?}");
     }
     #[test]

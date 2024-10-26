@@ -1,10 +1,118 @@
-// builtin module draw
+// using builtin module draw
 
-var draw_ctx = draw.create(720, 480, "Game Of Life", 10);
+class Buffer {
+    func __init__(l) {
+        this.inner = vec_u8.create(l * l);
+        this.l = l;
+    }
+
+    func destory() {
+        vec_u8.destory(this.inner);
+    }
+
+    func __index__(idx) {
+        return vec_u8.get(this.inner, idx[0] * this.l + idx[1]);
+    }
+
+    func __assign__(idx, val) {
+        vec_u8.set(this.inner, idx[0] * this.l + idx[1], val);
+    }
+
+    func len() {
+        return vec_u8.len(this.inner);
+    }
+}
+
+var BLUE = 6737151;
+var SIZE = 30;
+var draw_ctx = draw.create(720, 480, "Game Of Life", SIZE);
+var camera_pos = [0,10,10];
+var buffer = Buffer(SIZE);
+var time_since_last_update = 0;
+var T = 1;
+// 信号灯
+// draw.set_block(draw_ctx, 5,4, BLUE);
+// draw.set_block(draw_ctx, 5,5, BLUE);
+// draw.set_block(draw_ctx, 5,6, BLUE);
+// Glider
+draw.set_block(draw_ctx, 3,3, BLUE);
+
+draw.set_block(draw_ctx, 4,4, BLUE);
+draw.set_block(draw_ctx, 4,5, BLUE);
+
+draw.set_block(draw_ctx, 5,3, BLUE);
+draw.set_block(draw_ctx, 5,4, BLUE);
 
 
 while (not draw.should_close(draw_ctx)) {
+    // camera control
+    var frame_time = draw.get_frame_time(draw_ctx);
+    time_since_last_update = time_since_last_update + frame_time;
+    if (draw.is_key_pressed(draw_ctx, draw.KEY_W)) {
+        camera_pos[2] = camera_pos[2] - 10 * frame_time;
+    }
+    if (draw.is_key_pressed(draw_ctx, draw.KEY_S)) {
+        camera_pos[2] = camera_pos[2] + 10 * frame_time;
+    }
+    if (draw.is_key_pressed(draw_ctx, draw.KEY_A)) {
+        camera_pos[0] = camera_pos[0] - 10 * frame_time;
+    }
+    if (draw.is_key_pressed(draw_ctx, draw.KEY_D)) {
+        camera_pos[0] = camera_pos[0] + 10 * frame_time;
+    }
+    if (draw.is_key_pressed(draw_ctx, draw.KEY_Q)) {
+        camera_pos[1] = camera_pos[1] - 10 * frame_time;
+    }
+    if (draw.is_key_pressed(draw_ctx, draw.KEY_E)) {
+        camera_pos[1] = camera_pos[1] + 10 * frame_time;
+    }
+    draw.set_camera(draw_ctx, camera_pos[0], camera_pos[1], camera_pos[2]);
+    
+    // step...
+    func valid_pos(i, j) {
+        return i >= 0 and i < SIZE and j >= 0 and j < SIZE;
+    }
+    if (time_since_last_update > T){
+        time_since_last_update = 0;
+        for (var i: 0..SIZE) {
+            for (var j: 0..SIZE) {
+                var cnt = 0;
+                for (var k: (-1)..=1) {
+                    for (var l: (-1)..=1) {
+                        if (valid_pos(i + k, j + l) and 
+                                draw.get_block(draw_ctx, i + k, j + l) > 0) {
+                            cnt = cnt + 1;
+                        }
+                    }
+                }
+                if (draw.get_block(draw_ctx, i, j) > 0 ){
+                    if (cnt == 3 or cnt == 4) {
+                        buffer[[i,j]] = 1;
+                    } else {
+                        buffer[[i,j]] = 0;
+                    }
+                } else {
+                    if (cnt == 3) {
+                        buffer[[i,j]] = 1;
+                    }
+                }
+            }
+        }
+
+        // back to draw_ctx
+        for (var i: 0..SIZE) {
+            for (var j: 0..SIZE) {
+                if (buffer[[i,j]] > 0) {
+                    buffer[[i,j]] = 0;
+                    draw.set_block(draw_ctx, i, j , BLUE);
+                } else {
+                    draw.set_block(draw_ctx, i, j , 0);
+                }
+            }
+        }
+    }
     draw.render(draw_ctx);
 }
 
 draw.destory(draw_ctx);
+buffer.destory();

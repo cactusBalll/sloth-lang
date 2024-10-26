@@ -26,15 +26,30 @@ fn func_tool() {
 }
 
 #[test]
+fn test1() {
+    let src = r#"
+        var a = 3;
+        if (a > 4) {
+            print("yes");
+        }
+        if (a >= 3) {
+            print("yes");
+        }
+    "#;
+    let res = run_string_debug(&src, false, false);
+    println!("{res:?}");
+}
+
+#[test]
 fn brainfk() {
-    run_file("sloth/sloth_examples/brainfk.slt".into(), false);
+    run_file("sloth/sloth_examples/brainfk.slt".into(), false, false);
 }
 #[test]
 fn game_of_life() {
-    run_file("sloth/sloth_examples/game_of_life.slt".into(), false);
+    run_file("sloth/sloth_examples/game_of_life.slt".into(), false, false);
 }
 
-fn run_file(path: PathBuf, debug: bool) {
+fn run_file(path: PathBuf, only_compile: bool, debug: bool) {
     let cwd = std::env::current_dir().unwrap();
     let mut full_path = PathBuf::new();
     full_path.push(&cwd);
@@ -42,7 +57,7 @@ fn run_file(path: PathBuf, debug: bool) {
     let mut file = std::fs::File::open(full_path).unwrap();
     let mut buffer = String::new();
     file.read_to_string(&mut buffer).unwrap();
-    let res = run_string_debug(&buffer, false, debug);
+    let res = run_string_debug(&buffer, only_compile, debug);
     if debug {
         eprintln!("{res:?}");
     }

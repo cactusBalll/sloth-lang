@@ -168,6 +168,15 @@ impl Vm {
                 dbg!(&call_frame);
                 // dbg!(self.global.last().unwrap());
             }
+            // check
+            let num_locals = unsafe { (*(*call_frame.closure).chunk).num_locals };
+            if stack.len() < num_locals {
+                panic!(
+                    "stack corrupted, VM implementation issue {} < {}",
+                    stack.len(),
+                    num_locals
+                );
+            }
             match instr {
                 Instr::Add => {
                     let opr2 = stack.pop().unwrap();
@@ -731,6 +740,7 @@ impl Vm {
                     let call_frame = call_frame;
                     let idx = unsafe { (*(*call_frame.closure).chunk).constants[x].clone() };
                     if let Value::String(idx) = idx {
+                        // dbg!(&idx);
                         let val = self.global.last().unwrap()[&idx].clone();
                         stack.push(val);
                         self.pc_add();
@@ -1828,6 +1838,7 @@ impl Vm {
         format!("{s} in {line}")
     }
     fn run_gc(&mut self) -> EvalResult {
+        return Ok(());
         if self.objects.len() < 128 {
             return Ok(());
         }
@@ -2028,5 +2039,4 @@ impl Vm {
             panic!("not an OpaqueData");
         }
     }
-
 }

@@ -339,7 +339,7 @@ impl<'a> ParserCtx<'a> {
         let loop_start_point = self.chunk[self.depth].bytecodes.len();
         self.emit(Instr::Next);
         let backpatch_point = self.chunk[self.depth].bytecodes.len();
-        self.emit(Instr::JumpIfNot(0));
+        self.emit(Instr::Nop);
         self.emit(Instr::SetLocal(iter_var_slot));
         // self.emit(Instr::Pop);
 
@@ -521,7 +521,7 @@ impl<'a> ParserCtx<'a> {
         let jumpback_point = self.chunk[self.depth].bytecodes.len();
         self.parse_rval_expr(PrattPrecedence::Lowest)?;
         let patch_point = self.chunk[self.depth].bytecodes.len();
-        self.emit(Instr::JumpIfNot(0)); // to be patched
+        self.emit(Instr::Nop); // to be patched
         self.emit(Instr::Pop);
         self.consume(Token::RParen)?;
         self.consume(Token::LBrace)?;
@@ -553,12 +553,13 @@ impl<'a> ParserCtx<'a> {
         self.consume(Token::RBrace)?;
         self.chunk[self.depth].bytecodes[patch_point] =
             Instr::JumpIfNot(self.chunk[self.depth].bytecodes.len() as i32 - patch_point as i32);
+        self.emit(Instr::Pop);
         // patch break points, jump to end of loop
         for break_point in cur_loop_ctx.break_patch_point.iter() {
             self.chunk[self.depth].bytecodes[*break_point] =
                 Instr::Jump(self.chunk[self.depth].bytecodes.len() as i32 - *break_point as i32);
         }
-        self.emit(Instr::Pop);
+
         Ok(())
     }
     fn parse_block(&mut self) -> Result<(), String> {
@@ -585,31 +586,29 @@ impl<'a> ParserCtx<'a> {
             self.parse()?;
         }
         Ok(())
-    } 
+    }
     fn parse_if(&mut self) -> Result<(), String> {
         self.consume(Token::If)?;
         self.consume(Token::LParen)?;
         self.parse_rval_expr(PrattPrecedence::Lowest)?;
         let patch_point = self.chunk[self.depth].bytecodes.len();
         // emit an empty slot, jump to FALSE branch but FALSE branch is now not parsed.
-        self.emit(Instr::JumpIfNot(0));
+        self.emit(Instr::Nop);
         // pop the bool value
-        self.emit(Instr::Pop);
+        // self.emit(Instr::Pop);
         self.consume(Token::RParen)?;
         // self.consume(Token::LBrace)?;
         // self.open_block();
         self.parse()?;
         let patch_point2 = self.chunk[self.depth].bytecodes.len();
-        // pop the bool value
-        self.emit(Instr::Pop);
+
         // emit an empty slot, jump to end of if statement, but we still don't know if there
-        // is an else clause, Jump(0) is just nop.
-        self.emit(Instr::Jump(0));
+        // is an else clause.
+        self.emit(Instr::Nop);
         // self.close_block();
         // self.consume(Token::RBrace)?;
         self.chunk[self.depth].bytecodes[patch_point] =
             Instr::JumpIfNot((self.chunk[self.depth].bytecodes.len() - patch_point) as i32);
-        self.emit(Instr::Pop);
         if let Some(tok) = self.peek() {
             if Token::Else == tok {
                 self.advance();
@@ -618,6 +617,8 @@ impl<'a> ParserCtx<'a> {
                     Instr::Jump((self.chunk[self.depth].bytecodes.len() - patch_point2) as i32);
             }
         }
+        // just leave the value on the stack, clean it at last
+        self.emit(Instr::Pop);
         Ok(())
     }
     /// open function level env
