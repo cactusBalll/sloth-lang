@@ -1,0 +1,126 @@
+// using builtin module draw
+var random = draw.random;
+var floor = math.floor;
+
+var BLUE = 6737151;
+var RED = 14548991;
+var GREEN = 16768511;
+var SIZE = 25;
+var draw_ctx = draw.create(720, 480, "Snake", SIZE + 1);
+var snake_tail = [];
+var game_over = false;
+var key = 0;
+var vec = 3;
+var score = 0;
+
+var snake_head = [floor(SIZE / 2), floor(SIZE / 2)];
+snake_tail.push([floor(SIZE / 2), floor(SIZE / 2)]);
+
+var fruit = [0,0];
+
+func gen_fruit() {
+    fruit[0] = floor(random() * SIZE);
+    fruit[1] = floor(random() * SIZE);
+
+    while (fruit[0] == 0) {
+        fruit[0] = floor(random() * SIZE);
+    }
+
+    while (fruit[1] == 0) {
+        fruit[1] = floor(random() * SIZE);
+    }
+}
+gen_fruit();
+
+var time_since_last_update = 0;
+var SPEED = 0.5;
+
+while (not draw.should_close(draw_ctx)) {
+    var frame_time = draw.get_frame_time(draw_ctx);
+    time_since_last_update = time_since_last_update + frame_time;
+    if (draw.is_key_pressed(draw_ctx, draw.KEY_W)) {
+        // snake_head[0] = snake_head[0] - 1;
+        key = 1;
+    }
+    else if (draw.is_key_pressed(draw_ctx, draw.KEY_S)) {
+        // snake_head[0] = snake_head[0] + 1;
+        key = 2;
+    }
+    else if (draw.is_key_pressed(draw_ctx, draw.KEY_A)) {
+        // snake_head[1] = snake_head[1] - 1;
+        key = 3;
+    }
+    else if (draw.is_key_pressed(draw_ctx, draw.KEY_D)) {
+        // snake_head[1] = snake_head[1] + 1;
+        key = 4;
+    }
+    if (time_since_last_update > SPEED and not game_over) {
+        time_since_last_update = 0;
+        // snake cannot turn 180
+        if ((vec == 1 or vec == 2) and (key == 3 or key == 4)) {
+            vec = key;
+        }
+        if ((vec == 3 or vec == 4) and (key == 1 or key == 2)) {
+            vec = key;
+        }
+        if (vec == 1) {
+            snake_head[0] = snake_head[0] - 1;
+        }
+        else if (vec == 2) {
+            snake_head[0] = snake_head[0] + 1;
+        }
+        else if (vec == 3) {
+            snake_head[1] = snake_head[1] - 1;
+        }
+        else if (vec == 4) {
+            snake_head[1] = snake_head[1] + 1;
+        }
+
+        // clear
+        for (var i: 0..SIZE + 1) {
+            for (var j: 0..SIZE + 1) {
+                draw.set_block(draw_ctx, i, j, 0);
+            }
+        }
+        // wall
+        for (var i: 0..SIZE + 1) {
+            draw.set_block(draw_ctx, 0, i, BLUE);
+            draw.set_block(draw_ctx, SIZE, i, BLUE);
+            draw.set_block(draw_ctx, i, 0, BLUE);
+            draw.set_block(draw_ctx, i, SIZE, BLUE);
+        }
+        draw.set_block(draw_ctx, fruit[0], fruit[1], GREEN);
+        
+
+        var prev = snake_tail.pop_front();
+        // collision with tail
+        for (var elem: snake_tail) {
+            if (snake_head[0] == elem[0] and snake_head[1] == elem[1]) {
+                game_over = true;
+            }
+        }
+        snake_tail.push([snake_head[0], snake_head[1]]);
+        // collision with wall
+        if (snake_head[0] == 0 or snake_head[0] == SIZE or snake_head[1] == 0 or snake_head[1] == SIZE) {
+            game_over = true;
+        }
+        // eat fruit;
+        if (snake_head[0] == fruit[0] and snake_head[1] == fruit[1]) {
+            gen_fruit();
+            score = score + 1;
+            snake_tail.insert(0, prev);
+        }
+        for (var elem: snake_tail) {
+            draw.set_block(draw_ctx, elem[0], elem[1], GREEN);
+        }
+        draw.set_block(draw_ctx, fruit[0], fruit[1], RED);
+
+        
+    }
+    draw.render(draw_ctx);
+}
+
+draw.destory(draw_ctx);
+
+
+

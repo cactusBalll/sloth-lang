@@ -47,3 +47,55 @@ pub fn array_pop(vm: &mut Vm, arg_num: usize, _protected: bool) {
         panic!("`array_push` can ONLY push to Array.");
     }
 }
+
+pub fn array_pop_front(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(0, arg_num);
+    let _ = vm.get_stack().pop();
+    // Array is hided under me
+    let clct = vm.get_stack().pop().unwrap();
+
+    if let Value::Array(p_arr) = clct {
+        unsafe {
+            let v = (*p_arr).array.remove(0);
+            vm.get_stack().push(v);
+        }
+    } else {
+        panic!("`array_pop_front` can ONLY pop Array.");
+    }
+}
+
+pub fn array_remove(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(1, arg_num);
+    let idx = vm.gets_number();
+    let _ = vm.get_stack().pop();
+    // Array is hided under me
+    let clct = vm.get_stack().pop().unwrap();
+
+    if let Value::Array(p_arr) = clct {
+        unsafe {
+            let v = (*p_arr).array.remove(idx as usize);
+            vm.get_stack().push(v);
+        }
+    } else {
+        panic!("`array_pop_front` can ONLY remove from Array.");
+    }
+}
+
+pub fn array_insert(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(2, arg_num);
+    let v = vm.get_stack().pop().unwrap();
+    let idx = vm.gets_number();
+    let _ = vm.get_stack().pop();
+    // Array is hided under me
+    let clct = vm.get_stack().pop().unwrap();
+
+    if let Value::Array(p_arr) = clct {
+        unsafe {
+            (*p_arr).array.insert(idx as usize, v);
+        }
+    } else {
+        panic!("`array_inser` can ONLY insert into Array.");
+    }
+    vm.get_stack().push(Value::Nil);
+}
+

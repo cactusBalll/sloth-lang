@@ -313,7 +313,7 @@ impl<'a> ScannerCtx<'a> {
                         ret.push(c);
                         self.advance()?;
                     } else if c == '.' {
-                        let c2 = self.peek();
+                        let c2 = self.peekn(2);
                         if Some('.') == c2 {
                             //.. and ..=
                             break;

@@ -48,6 +48,10 @@ fn brainfk() {
 fn game_of_life() {
     run_file("sloth/sloth_examples/game_of_life.slt".into(), false, false);
 }
+#[test]
+fn snake() {
+    run_file("sloth/sloth_examples/snake.slt".into(), false, false);
+}
 
 fn run_file(path: PathBuf, only_compile: bool, debug: bool) {
     let cwd = std::env::current_dir().unwrap();
@@ -58,7 +62,7 @@ fn run_file(path: PathBuf, only_compile: bool, debug: bool) {
     let mut buffer = String::new();
     file.read_to_string(&mut buffer).unwrap();
     let res = run_string_debug(&buffer, only_compile, debug);
-    if debug {
-        eprintln!("{res:?}");
+    if let Err(e) = res {
+        eprintln!("{e:?}");
     }
 }

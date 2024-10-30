@@ -6,6 +6,7 @@ mod interned_string;
 mod native;
 mod vec;
 mod draw;
+mod math;
 mod vm;
 
 use std::collections::HashMap;
@@ -62,6 +63,9 @@ pub fn prelude() -> Vec<(String, Value)> {
         ),
         mf_entry!("__Array_push__", extension_methods::array_push),
         mf_entry!("__Array_pop__", extension_methods::array_pop),
+        mf_entry!("__Array_pop_front__", extension_methods::array_pop_front),
+        mf_entry!("__Array_insert__", extension_methods::array_insert),
+        mf_entry!("__Array_remove__", extension_methods::array_remove),
         mf_entry!("as_glob", sloth_add_glob),
         mf_entry!("ord", sloth_ord),
         mf_entry!("chr", sloth_chr),
@@ -103,7 +107,8 @@ pub fn run_string_debug(prog: &str, only_compile: bool, debug: bool) -> Result<(
     vm.load_native_module(Some(&name), module);
     let (name, module) = draw::module_export();
     vm.load_native_module(Some(&name), module);
-
+    let (name, module) = math::module_export();
+    vm.load_native_module(Some(&name), module);
     if !only_compile {
         vm.run()?;
     }

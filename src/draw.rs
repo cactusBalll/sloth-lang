@@ -52,8 +52,8 @@ pub fn draw_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
         camera: raylib::ffi::Camera3D {
             position: raylib::ffi::Vector3 {
                 x: 0.,
-                y: 10.,
-                z: 10.,
+                y: 20.,
+                z: 20.,
             },
             target: raylib::ffi::Vector3 {
                 x: 0.,
@@ -77,6 +77,7 @@ pub fn draw_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
             panic!("raylib backend create window failed.");
         }
         raylib::ffi::SetTargetFPS(60);
+        raylib::ffi::SetRandomSeed(168);
     }
     let p_draw_ctx = Box::into_raw(b_draw_ctx);
     vm.get_stack()
@@ -204,6 +205,12 @@ pub fn draw_destory(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
+pub fn draw_random(vm: &mut Vm, arg_num: usize, _protected: bool) {
+    arity_assert!(0, arg_num);
+    let _ = vm.get_stack().pop();
+    let v = unsafe { raylib::ffi::GetRandomValue(0, 65535) };
+    vm.get_stack().push(Value::Number((v as f64) / 65535.0));
+}
 pub fn module_export() -> (String, Vec<(String, Value)>) {
     let module_name = "draw".to_owned();
 
@@ -217,6 +224,7 @@ pub fn module_export() -> (String, Vec<(String, Value)>) {
         mf_entry!("set_camera", draw_set_camera_pos),
         mf_entry!("is_key_pressed", draw_is_key_pressed),
         mf_entry!("get_frame_time", draw_get_frame_time),
+        mf_entry!("random", draw_random),
     ];
     let mut keys = export_enum!(
         KEY_NULL = 0,
