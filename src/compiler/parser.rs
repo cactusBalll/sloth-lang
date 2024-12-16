@@ -226,6 +226,7 @@ impl<'a> ParserCtx<'a> {
             | Token::Nil
             | Token::Sub
             | Token::Super
+            | Token::Stick
             | Token::This => {
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 self.emit(Instr::Pop);
@@ -1120,7 +1121,7 @@ impl<'a> ParserCtx<'a> {
     fn emit(&mut self, instr: Instr) {
         self.chunk[self.depth].bytecodes.push(instr);
         if self.ptr >= self.len {
-            self.chunk[self.depth].lines.push(self.len);
+            self.chunk[self.depth].lines.push(self.token_cood.last().unwrap().0);
         } else {
             self.chunk[self.depth]
                 .lines

@@ -1,4 +1,4 @@
-## tier-1 TODO
+## tier-1 TODO all done
 
 - parser 对 EOF 的处理 done
 - 移除奇怪的assign（强行LL(1) done
@@ -26,51 +26,5 @@
 - debugger
 - VSCode syntax highlight
 ```
-class A:B {
-    var a{
 
-    }=(t){
 
-    }
-    var b{
-
-    }
-    var c=(t){
-        
-    }
-    func foo() {
-        print(a)
-    }
-    func +(b) {
-        a += b
-    }
-    func -(b) {
-
-    }
-    func %(b) {}
-    func 
-    func *(b) {
-
-    }
-    func /(b) {
-
-    }
-    func __idxset__(idx,v){
-
-    } 
-    func __idxget__(idx){
-
-    }
-}
-```
-```
-Command	Description
->	Move the pointer to the right
-<	Move the pointer to the left
-+	Increment the memory cell at the pointer
--	Decrement the memory cell at the pointer
-.	Output the character signified by the cell at the pointer
-,	Input a character and store it in the cell at the pointer
-[	Jump past the matching ] if the cell at the pointer is 0
-]	Jump back to the matching [ if the cell at the pointer is nonzero
-```

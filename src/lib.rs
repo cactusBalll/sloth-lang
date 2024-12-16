@@ -10,6 +10,7 @@ mod math;
 mod vm;
 
 use std::collections::HashMap;
+use std::ffi::{c_char, CStr};
 use std::fmt::{self, Debug};
 use std::io::Write;
 
@@ -70,6 +71,26 @@ pub fn prelude() -> Vec<(String, Value)> {
         mf_entry!("ord", sloth_ord),
         mf_entry!("chr", sloth_chr),
     ]
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_lang_run_string(prog: *const c_char) -> i32{
+    let s = unsafe {
+        CStr::from_ptr(prog)
+    };
+    print!("{s:?}");
+    if let Ok(s) = s.to_str() {
+        let res = run_string(s, false);
+        if let Err(err) = res {
+            eprintln!("sloth interpreter quited with error: {err}");
+            return 1;
+        } else {
+            return 0;
+        }
+    } else {
+        eprintln!("failed to read prog");
+        return 1;
+    }
 }
 pub fn run_string(prog: &str, only_compile: bool) -> Result<(), String> {
     run_string_debug(prog, only_compile, false)
@@ -548,7 +569,7 @@ mod test {
                     this.height = 100;
                 }
                 func say() {
-                    print("Mammal", this.weight, this.height);
+                    print("Mammal", this.weight, this.height, "\n");
                 }
             }
 
@@ -557,11 +578,26 @@ mod test {
                     super.__init__();
                     this.height = 70;
                 }
+                func say() {
+                    print("meow");
+                    super.say();
+                }
             }
 
-            var cat = Cat();
-            cat.say();
-            print(cat is Cat, cat is Mammal, cat is Fish);
+            class Dog:Mammal{
+                func __init__() {
+                    super.__init__();
+                }
+                func say() {
+                    print("woff");
+                    super.say();
+                }
+            }
+            var l = [Cat(), Dog(), Mammal()];
+            for (var m: l) {
+                m.say();
+            }
+
         "#;
         let res = run_string(&src, false);
         println!("{res:?}");
@@ -810,19 +846,19 @@ mod test {
                 var i = 0;
                 while(i < n) {
                     var v = fiber.yield(i);
-                    print(v);
+                    print("v from main fiber: ${v} \n");
                     i = i + 1;
-                    print(i);
                     if (i > 5) {
-                        print("error in fiber");
+                        print("error in fiber\n");
                         fiber.error();
                     }
                 }
             },10);
-            
+            var cnt = 0;
             while(fiber.check(f)) {
-                print(fiber.resumable(f));
-                fiber.resume(f);
+                cnt = cnt + 3;
+                print("resumable: ${fiber.resumable(f)}\n");
+                print("got i from fiber: ${fiber.resume(f, cnt)}\n");
             }
         "#;
         let res = run_string(&src, false);
@@ -855,6 +891,236 @@ mod test {
             print("hello ${||{return "${[1,2,3,4,5]}";}()}");
         "#;
         let res = run_string_debug(&src, false, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example0() {
+        let src = r#"
+            var functool = import("./sloth/sloth_lib/func_tool.slt");
+            var names = ["Curry", "Dijkstra", "Benjamin", "Hitori", "foo"];
+            names |> functool.map(|name|{
+                print("Hello , ${name} for 6 times!\n");
+                for (var i: 0..=5) {
+                    print("${name}!");
+                }
+                print("\n");
+            });
+            for (var i: 0..=5) {
+                i |> print;
+            }
+        "#;
+        let res = run_string_debug(&src, false, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn example_oop() {
+        let src = r#"
+            class Mammal{
+                func __init__() {
+                    this.kind = "Mammal";
+                }
+                func say() {
+                    print("Mammal", "kind is:", this.kind, "\n");
+                }
+            }
+
+            class Cat:Mammal{
+                func __init__() {
+                    super.__init__();
+                    this.kind = "Cat";
+                }
+                func say() {
+                    print("meow\n");
+                    super.say();
+                }
+            }
+
+            class Dog:Mammal{
+                func __init__() {
+                    super.__init__();
+                    this.kind = "Dog";
+                }
+                func say() {
+                    print("woff\n");
+                    super.say();
+                }
+            }
+            class Fish{
+                func __init__() {
+                    this.kind = "Fish";
+                }
+                func say() {
+                    print("Fish", "kind is:", this.kind, "\n");
+                }
+            }
+            var l = [Cat(), Dog(), Mammal(), Fish()];
+            for (var m: l) {
+                m.say();
+                print("${m.kind} is Mammal: ${m is Mammal}\n");
+            }
+
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example_oop1() {  
+        let src = r#"
+            class Fruit{
+                func __init__(name) {
+                    this.name = name;
+                }
+                func whoami() {
+                    print(this.name);
+                }                
+            }
+
+            var orange = Fruit("orange");
+            var eggplant = Fruit("eggplant");
+            var cactus = Fruit("cactus");
+
+            var methods2call = [orange.whoami, eggplant.whoami, cactus.whoami];
+            // orange eggplant cactus
+            for (var m: methods2call) {
+                m();
+            }
+        "#;
+        let res = run_string_debug(&src, false, false);
+        println!("{res:?}");
+    }
+    #[test]
+    fn example_fp() {  
+        let src = r#"
+            // 匿名函数
+            |param1, param2, paramn|{};
+            // 赋值给变量
+            var f = |a, b|{return a + b;};
+            // 直接调用
+            var res = |a, b|{return a + b;}(1 , 3);
+            // 4
+            print(res);
+        "#;
+        let res = run_string_debug(&src, false, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example_fp2() {  
+        let src = r#"
+            var functool = import("sloth/sloth_lib/func_tool.slt");
+            var map = functool.map;
+            var reduce = functool.reduce;
+            var res = [1,2,3,4,5] 
+                |> map(
+                    |a| {return a * 2;}
+                )
+                |> reduce(
+                    |a,b|{return a + b;},
+                    0
+                ); 
+            // 30
+            print(res);
+        "#;
+        let res = run_string_debug(&src, false, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example_iter() {  
+        let src = r#"
+            var arr = [2,3,5,7,11,13];
+            var s = "sloth on win64";
+            var map = @("GCC": 10, "Clang": 13, "MSVC": 19);
+            for (var i: 1..=10) {
+                print(i);
+            }
+            print("\n");
+            for (var i: arr) {
+                print(i);
+            }
+            print("\n");
+            for (var c: s) {
+                print(c,",");
+            }
+            print("\n");
+            for (var pair: map) {
+                print(pair);
+            }
+            print("\n");
+        "#;
+        let res = run_string_debug(&src, false, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example_iter2() {
+        let src = r#"
+            class One2Twenty{
+                func __iter__() {
+                    class Iter{
+                        func __init__() {
+                            this.x = 0;
+                        }
+                        func __next__() {
+                            this.x = this.x + 1;
+                            if (this.x <= 20) {
+                                return this.x;
+                            } else {
+                                return nil;
+                            }
+                        }
+                    }
+                    return Iter();
+                }
+            }
+            var one2twenty = One2Twenty();
+            for (var i: one2twenty) {
+                print(i);
+            }
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example_str() {
+        let src = r#"
+            var world = @("中文": "世界", "English": "world");
+            print("hello ${world["English"]}\n");
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example_vaf() {
+        let src = r#"
+            func add_all(...) {
+                var ret = 0;
+                for(var i: va_arg()) {
+                    ret = ret + i;
+                }
+                return ret;
+            }
+            //15
+            print(add_all(1,2,3,4,5));
+            //8
+            print(add_all(1,3,4));
+        "#;
+        let res = run_string(&src, false);
+        println!("{res:?}");
+    }
+
+    #[test]
+    fn example_for() {
+        let src = r#"
+            for (var i: 1..=10) {
+                print(i);
+            }
+        "#;
+        let res = run_string_debug(&src, true, true);
         println!("{res:?}");
     }
 }

@@ -35,11 +35,15 @@ fn test1() {
         if (a >= 3) {
             print("yes");
         }
+        print("end");
     "#;
     let res = run_string_debug(&src, false, false);
     println!("{res:?}");
 }
-
+#[test]
+fn hello() {
+    run_file("sloth/sloth_examples/hello.slt".into(), false, false);
+}
 #[test]
 fn brainfk() {
     run_file("sloth/sloth_examples/brainfk.slt".into(), false, false);
