@@ -1838,75 +1838,34 @@ impl Vm {
         format!("{s} in {line}")
     }
     fn run_gc(&mut self) -> EvalResult {
-        return Ok(());
         if self.objects.len() < 128 {
             return Ok(());
         }
-        macro_rules! mark_val {
-            ($v:expr) => {
-                match $v {
-                    Value::Array(p_arr) => {
-                        unsafe {
-                            let arr = &mut **p_arr;
-                            arr.mark();
-                            arr.mark_children();
-                        };
-                    }
-                    Value::Dictionary(p_dict) => {
-                        unsafe {
-                            let dict = &mut **p_dict;
-                            dict.mark();
-                            dict.mark_children();
-                        };
-                    }
-                    Value::Closure(p_closure) => {
-                        unsafe {
-                            let closure = &mut **p_closure;
-                            closure.mark();
-                            closure.mark_children();
-                        };
-                    }
-                    Value::Fiber(p_fiber) => unsafe {
-                        let fiber = &mut **p_fiber;
-                        fiber.mark();
-                        fiber.mark_children();
-                    },
-                    Value::Klass(p) => unsafe {
-                        let p = &mut **p;
-                        p.mark();
-                        p.mark_children();
-                    },
-                    Value::Instance(p) => unsafe {
-                        let p = &mut **p;
-                        p.mark();
-                        p.mark_children();
-                    },
-                    Value::Module(p) => unsafe {
-                        let p = &mut **p;
-                        p.mark();
-                        p.mark_children();
-                    },
-                    Value::ArrayIter(p, _) => unsafe {
-                        let p = &mut **p;
-                        p.mark();
-                        p.mark_children();
-                    },
-                    _ => {}
-                }
-            };
+        // `main_fiber` is not stored in `self.objects`, so it is not demarked
+        // by the sweep below. Demark it explicitly, otherwise its children
+        // would be skipped after the first collection.
+        self.main_fiber.demark();
+
+        // Roots: the currently executing fiber (which also keeps its call
+        // frame chain alive), the main fiber and all global namespaces.
+        unsafe {
+            mark_gc_object(&mut *self.executing_fiber);
         }
-        for val in self.main_fiber.stack.iter_mut() {
-            mark_val!(val);
-        }
-        for g in self.global.iter_mut() {
-            for (_s, v) in g.iter_mut() {
-                mark_val!(v);
+        mark_gc_object(&mut *self.main_fiber);
+        for g in self.global.iter() {
+            for v in g.values() {
+                mark_value(v);
             }
         }
-        unsafe {
-            (*self.executing_fiber).mark();
-            (*self.executing_fiber).mark_children();
+        // Open upvalues are owned by a fiber's stack/frames, but keep them
+        // alive while they are registered. `LoadChunk` dereferences these
+        // raw pointers when looking for an existing upvalue.
+        for upv in self.upvalues.iter() {
+            unsafe {
+                mark_gc_object(&mut **upv);
+            }
         }
+
         let mut new_obj_vec: Vec<Box<dyn GCObject>> = self
             .objects
             .drain(0..)

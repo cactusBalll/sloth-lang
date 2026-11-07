@@ -201,40 +201,31 @@ macro_rules! derive_gcobject {
         }
     };
 }
-macro_rules! mark_proc {
-    ($val:expr) => {
-        match $val {
-            Value::Array(p_arr) => {
-                unsafe {
-                    let arr = &mut **p_arr;
-                    if !arr.is_marked() {
-                        arr.mark();
-                        arr.mark_children();
-                    }
-                };
-            }
-            Value::Dictionary(p_dict) => {
-                unsafe {
-                    let dict = &mut **p_dict;
-                    if !dict.is_marked() {
-                        dict.mark();
-                        dict.mark_children();
-                    }
-                };
-            }
-            Value::Closure(p_closure) => {
-                unsafe {
-                    let closure = &mut **p_closure;
-                    if !closure.is_marked() {
-                        closure.mark();
-                        closure.mark_children();
-                    }
-                };
-            }
+/// Mark a value and, if it is heap allocated, everything reachable from it.
+#[inline]
+fn mark_value(val: &Value) {
+    match val {
+        Value::Array(p_arr) => unsafe { mark_gc_object(&mut **p_arr) },
+        Value::Dictionary(p_dict) | Value::Error(p_dict) | Value::Module(p_dict) => unsafe {
+            mark_gc_object(&mut **p_dict)
+        },
+        Value::Closure(p_closure) => unsafe { mark_gc_object(&mut **p_closure) },
+        Value::Fiber(p_fiber) => unsafe { mark_gc_object(&mut **p_fiber) },
+        Value::Klass(p_klass) => unsafe { mark_gc_object(&mut **p_klass) },
+        Value::Instance(p_instance) => unsafe { mark_gc_object(&mut **p_instance) },
+        Value::ArrayIter(p_arr, _) => unsafe { mark_gc_object(&mut **p_arr) },
+        _ => {}
+    }
+}
 
-            _ => {}
-        }
-    };
+/// Mark an object before visiting its children. Setting the mark first makes
+/// marking safe for cyclic object graphs (an object is never visited twice).
+#[inline]
+fn mark_gc_object<T: GCObject>(obj: &mut T) {
+    if !obj.is_marked() {
+        obj.mark();
+        obj.mark_children();
+    }
 }
 derive_gcobject!(Matrix);
 impl GCObject for UpValueObject {
@@ -243,7 +234,7 @@ impl GCObject for UpValueObject {
         match &self.value {
             UpValue::Ref(_) => {}
             UpValue::Closed(val) => {
-                mark_proc!(val);
+                mark_value(val);
             }
         }
     }
@@ -253,7 +244,7 @@ impl GCObject for Array {
     gcobject_header!();
     fn mark_children(&mut self) {
         for val in self.array.iter() {
-            mark_proc!(val);
+            mark_value(val);
         }
     }
 }
@@ -262,19 +253,12 @@ impl GCObject for Closure {
     fn mark_children(&mut self) {
         for p_upv in self.upvalues.iter() {
             unsafe {
-                let upv = *p_upv;
-                if !(*upv).is_marked() {
-                    (*upv).mark();
-                    (*upv).mark_children();
-                }
+                mark_gc_object(&mut **p_upv);
             }
         }
-        unsafe {
-            if let Some(has_this_ref) = self.this_ref {
-                if !(*has_this_ref).is_marked() {
-                    (*has_this_ref).mark();
-                    (*has_this_ref).mark_children();
-                }
+        if let Some(has_this_ref) = self.this_ref {
+            unsafe {
+                mark_gc_object(&mut *has_this_ref);
             }
         }
     }
@@ -283,7 +267,7 @@ impl GCObject for Dict {
     gcobject_header!();
     fn mark_children(&mut self) {
         for val in self.dict.values() {
-            mark_proc!(val);
+            mark_value(val);
         }
     }
 }
@@ -291,14 +275,14 @@ impl GCObject for Dict {
 impl GCObject for Klass {
     gcobject_header!();
     fn mark_children(&mut self) {
-        unsafe {
-            if !(*self.super_klass).is_marked() {
-                (*self.super_klass).mark();
-                (*self.super_klass).mark_children();
+        // `super_klass` is null for a class without a base class.
+        if !self.super_klass.is_null() {
+            unsafe {
+                mark_gc_object(&mut *self.super_klass);
             }
         }
         for val in self.methods.values() {
-            mark_proc!(val);
+            mark_value(val);
         }
     }
 }
@@ -306,53 +290,38 @@ impl GCObject for Klass {
 impl GCObject for Instance {
     gcobject_header!();
     fn mark_children(&mut self) {
-        unsafe {
-            if !(*self.klass).is_marked() {
-                (*self.klass).mark();
-                (*self.klass).mark_children();
+        if !self.klass.is_null() {
+            unsafe {
+                mark_gc_object(&mut *self.klass);
             }
         }
         for val in self.fields.values() {
-            mark_proc!(val);
+            mark_value(val);
         }
     }
 }
 impl GCObject for Fiber {
     gcobject_header!();
     fn mark_children(&mut self) {
-        for call_frame in self.call_frames.iter_mut() {
+        // A closure and its arguments are not kept on the operand stack while
+        // the frame is executing, so every call frame must be treated as a
+        // root as well.
+        for call_frame in self.call_frames.iter() {
             unsafe {
-                let closure = &mut (*call_frame.closure);
-                if !closure.is_marked() {
-                    closure.mark();
-                    closure.mark_children();
-                }
+                mark_gc_object(&mut *call_frame.closure);
             }
-            for val in self.stack.iter_mut() {
-                match val {
-                    Value::Array(p_arr) => {
-                        unsafe {
-                            let arr = &mut **p_arr;
-                            arr.mark();
-                            arr.mark_children();
-                        };
-                    }
-                    Value::Dictionary(p_dict) => {
-                        unsafe {
-                            let dict = &mut **p_dict;
-                            dict.mark();
-                            dict.mark_children();
-                        };
-                    }
-                    Value::Closure(p_closure) => {
-                        unsafe {
-                            let closure = &mut **p_closure;
-                            closure.mark();
-                            closure.mark_children();
-                        };
-                    }
-                    _ => {}
-                }
+            for val in call_frame.va_args.iter() {
+                mark_value(val);
+            }
+        }
+        for val in self.stack.iter() {
+            mark_value(val);
+        }
+        // A paused/yielded fiber can only be reached through the `prev`
+        // chain. Keep its parents alive until control returns to them.
+        if !self.prev.is_null() {
+            unsafe {
+                mark_gc_object(&mut *self.prev);
             }
         }
     }
