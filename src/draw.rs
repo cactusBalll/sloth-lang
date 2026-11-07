@@ -100,7 +100,7 @@ pub fn draw_set_block(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let op_data = vm.gets_opaque() as *mut DrawCtx;
     let _ = vm.get_stack().pop();
     unsafe {
-        (*op_data).block_map[i as usize][j as usize] = color as u32;
+        (&mut *op_data).block_map[i as usize][j as usize] = color as u32;
     }
 
     vm.get_stack().push(Value::Nil);
@@ -113,7 +113,7 @@ pub fn draw_get_block(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let op_data = vm.gets_opaque() as *mut DrawCtx;
     let _ = vm.get_stack().pop();
     unsafe {
-        let color = (*op_data).block_map[i as usize][j as usize];
+        let color = (&mut *op_data).block_map[i as usize][j as usize];
         vm.get_stack().push(Value::Number(color as f64));
     }
 }

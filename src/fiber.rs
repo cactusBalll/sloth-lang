@@ -156,7 +156,7 @@ pub fn sloth_fiber_set_error(vm: &mut Vm, arg_num: usize, _protected: bool) {
             eprintln!("stack: {:?}", vm.get_stack());
             eprintln!("call_frame: {:?}", vm.get_call_frame());
             let pc = vm.get_call_frame().pc;
-            let instr = (*(*vm.get_call_frame().closure).chunk).bytecodes[pc];
+            let instr = (&*(&mut *vm.get_call_frame().closure).chunk).bytecodes[pc];
             eprintln!("instr: {:?}", instr);
             panic!("fiber error occured but nowhere to go.");
         }

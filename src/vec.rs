@@ -56,7 +56,7 @@ pub fn vec_u8_set(vm: &mut Vm, arg_num: usize, _protected: bool) {
         if idx >= (*clct).len() {
             panic!("index out of range, index: {} len: {}", idx, (*clct).len());
         }
-        (*clct)[idx] = val as u8;
+        (&mut *clct)[idx] = val as u8;
     }
     vm.get_stack().push(Value::Nil);
 }
@@ -80,7 +80,7 @@ pub fn vec_u8_get(vm: &mut Vm, arg_num: usize, _protected: bool) {
         if idx >= (*clct).len() {
             panic!("index out of range, index: {} len: {}", idx, (*clct).len());
         }
-        let val = (*clct)[idx];
+        let val = (&mut *clct)[idx];
         vm.get_stack().push(Value::Number(val as f64));
     }
 }

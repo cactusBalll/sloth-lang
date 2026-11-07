@@ -160,7 +160,7 @@ impl Vm {
             let call_frame = unsafe { (*self.executing_fiber).call_frames.last_mut().unwrap() };
             let closure = call_frame.closure;
             let mut stack = unsafe { &mut (*self.executing_fiber).stack };
-            let instr = unsafe { (*(*call_frame.closure).chunk).bytecodes[call_frame.pc] };
+            let instr = unsafe { (&*(&*call_frame.closure).chunk).bytecodes[call_frame.pc] };
             let pc = call_frame.pc;
             if self.debug {
                 dbg!(&instr);
@@ -738,7 +738,7 @@ impl Vm {
                 }
                 Instr::GetGlobal(x) => {
                     let call_frame = call_frame;
-                    let idx = unsafe { (*(*call_frame.closure).chunk).constants[x].clone() };
+                    let idx = unsafe { (&*(&*call_frame.closure).chunk).constants[x].clone() };
                     if let Value::String(idx) = idx {
                         // dbg!(&idx);
                         let val = self.global.last().unwrap()[&idx].clone();
@@ -750,7 +750,7 @@ impl Vm {
                 }
                 Instr::SetGlobal(x) => {
                     let call_frame = call_frame;
-                    let idx = unsafe { (*(*call_frame.closure).chunk).constants[x].clone() };
+                    let idx = unsafe { (&*(&*call_frame.closure).chunk).constants[x].clone() };
                     let v = stack.pop().unwrap();
                     if let Value::String(idx) = idx {
                         self.global.last_mut().unwrap().insert(idx, v);
@@ -1187,7 +1187,7 @@ impl Vm {
                             stack.push(Value::Nil);
                             self.pc_add();
                         } else {
-                            let v = (**arr).array[*i].clone();
+                            let v = (&mut **arr).array[*i].clone();
                             *i += 1;
                             stack.push(v);
                             self.pc_add();
@@ -1834,7 +1834,7 @@ impl Vm {
     #[inline]
     fn eval_err_str(&self, s: &str) -> String {
         let callframe = self.get_call_frame();
-        let line = unsafe { (*(*callframe.closure).chunk).lines[callframe.pc] };
+        let line = unsafe { (&*(&*callframe.closure).chunk).lines[callframe.pc] };
         format!("{s} in {line}")
     }
     fn run_gc(&mut self) -> EvalResult {
