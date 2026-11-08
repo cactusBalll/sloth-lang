@@ -1,4 +1,7 @@
+#![cfg(feature = "raylib")]
+
 #[test]
+#[ignore = "requires a GUI window; run manually"]
 fn simple() {
     use raylib::prelude::*;
 

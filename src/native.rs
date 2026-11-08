@@ -73,6 +73,18 @@ pub fn sloth_load_module(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let path = vm.get_stack().pop().unwrap();
     if let ValueKind::String(path) = path.kind() {
         vm.get_stack().pop();
+        if vm.has_precompiled_modules() {
+            if vm.load_precompiled_module(path.get_inner()) {
+                vm.fiber_changed = true;
+            } else {
+                let msg = format!(
+                    "module `{}` was not precompiled for the AOT backend; only literal import paths are supported",
+                    path.get_inner()
+                );
+                vm.set_last_error(msg);
+            }
+            return;
+        }
         vm.fiber_changed = true;
         let full_path = vm.interpreter_cwd.join(path.get_inner());
         let mut file = File::open(&full_path).unwrap();

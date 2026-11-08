@@ -100,6 +100,16 @@ impl Value {
     }
 }
 
+#[cfg(not(feature = "nan-boxing"))]
+impl Value {
+    // The AOT backend requires NaN-boxing.  These constants only exist so the
+    // backend module can be compiled in tagged-union builds; `build_executable`
+    // rejects those builds at runtime.
+    pub const NIL_BITS: u64 = 0;
+    pub const TRUE_BITS: u64 = 1;
+    pub const FALSE_BITS: u64 = 2;
+}
+
 // ===========================================================================
 // NaN-boxed representation
 // ===========================================================================
@@ -222,6 +232,13 @@ pub struct Value(u64);
 impl Value {
     #[allow(non_snake_case, non_upper_case_globals)]
     pub const Nil: Value = Value(pack(TAG_NIL, 0));
+
+    /// Raw bits of the nil immediate.
+    pub const NIL_BITS: u64 = pack(TAG_NIL, 0);
+    /// Raw bits of the true immediate.
+    pub const TRUE_BITS: u64 = pack(TAG_TRUE, 0);
+    /// Raw bits of the false immediate.
+    pub const FALSE_BITS: u64 = pack(TAG_FALSE, 0);
 
     #[allow(non_snake_case)]
     pub fn Bool(value: bool) -> Value {
@@ -356,6 +373,83 @@ impl Value {
                 }
             },
             _ => unreachable!("reserved NaN-box tag"),
+        }
+    }
+
+    /// Raw bits of this value, without transferring ownership.
+    #[inline]
+    pub fn to_bits(&self) -> u64 {
+        self.0
+    }
+
+    /// Consume the value and return its bits, transferring ownership of any
+    /// reference counted payload to the caller.
+    #[inline]
+    pub fn into_bits(self) -> u64 {
+        let bits = self.0;
+        std::mem::forget(self);
+        bits
+    }
+
+    /// Reconstruct a value from bits.  The caller takes ownership of the
+    /// reference counted payload (if any) represented by `bits`.
+    ///
+    /// # Safety
+    /// `bits` must be a valid value word; for reference counted payloads the
+    /// caller must own one reference.
+    #[inline]
+    pub unsafe fn from_bits(bits: u64) -> Value {
+        Value(bits)
+    }
+
+    /// Increment the reference count of a reference counted payload.
+    #[inline]
+    pub unsafe fn retain_bits(bits: u64) {
+        if !is_tagged(bits) {
+            return;
+        }
+        match tag_of(bits) {
+            TAG_STRING => IString::retain_raw(payload_pointer::<u8>(payload_of(bits))),
+            TAG_BOXED => {
+                (*payload_pointer::<BoxedValue>(payload_of(bits))).refs += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// Release one reference of a reference counted payload.
+    #[inline]
+    pub unsafe fn release_bits(bits: u64) {
+        if !is_tagged(bits) {
+            return;
+        }
+        match tag_of(bits) {
+            TAG_STRING => IString::release_raw(payload_pointer::<u8>(payload_of(bits))),
+            TAG_BOXED => {
+                let boxed = payload_pointer::<BoxedValue>(payload_of(bits));
+                (*boxed).refs -= 1;
+                if (*boxed).refs == 0 {
+                    drop(Box::from_raw(boxed));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True when the raw word is an ordinary number (not a tagged immediate or
+    /// heap pointer).
+    #[inline]
+    pub fn is_number_bits(bits: u64) -> bool {
+        !is_tagged(bits)
+    }
+
+    /// Tag of a raw value word, or `None` for plain numbers.
+    #[inline]
+    pub fn tag_bits(bits: u64) -> Option<u8> {
+        if is_tagged(bits) {
+            Some(tag_of(bits))
+        } else {
+            None
         }
     }
 }

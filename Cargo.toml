@@ -8,14 +8,21 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = ["nan-boxing"]
+default = ["nan-boxing", "raylib"]
 # Store values in a single NaN-boxed 64 bit word instead of the default
 # tagged-union enum.
 nan-boxing = []
+# Enable the raylib based `draw` module.  The AOT runtime is built without
+# this feature so the generated executable does not depend on X11/GL.
+raylib = ["dep:raylib"]
 
 [dependencies]
 clap = { version = "4.5.20", features = ["derive"] }
-raylib = "5.0.2"
+raylib = { version = "5.0.2", optional = true }
+
+[workspace]
+members = ["runtime"]
+resolver = "2"
 
 [dev-dependencies]
 criterion = "0.3"

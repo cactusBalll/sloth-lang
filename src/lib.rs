@@ -1,15 +1,16 @@
-mod bytecode;
-mod compiler;
-mod extension_methods;
-mod fiber;
-#[allow(dead_code)]
-mod interned_string;
-mod native;
-mod value;
-mod vec;
-mod draw;
-mod math;
-mod vm;
+pub mod backend;
+pub mod bytecode;
+pub mod compiler;
+pub mod extension_methods;
+pub mod fiber;
+pub mod interned_string;
+pub mod native;
+pub mod value;
+pub mod vec;
+#[cfg(feature = "raylib")]
+pub mod draw;
+pub mod math;
+pub mod vm;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
@@ -18,14 +19,14 @@ use std::io::Write;
 
 use compiler::parser::{self, ParserCtx};
 use compiler::scanner::{self, ScannerCtx};
-use interned_string::{IString, StringPool};
+pub use interned_string::{IString, StringPool};
 pub use bytecode::{Instr, OpCode};
 pub use value::{Value, ValueKind};
 use native::{
     sloth_add_glob, sloth_chr, sloth_input, sloth_load_module, sloth_ord, sloth_print_val,
     sloth_to_bool, sloth_to_number, sloth_to_string, sloth_typeof, sloth_va_arg,
 };
-use vm::{CallFrame, Vm};
+pub use vm::{CallFrame, EvalError, Step, Vm};
 
 macro_rules! mf_entry {
     ($name:expr,$func:expr) => {
@@ -130,8 +131,11 @@ pub fn run_string_debug(prog: &str, only_compile: bool, debug: bool) -> Result<(
     vm.load_native_module(Some(&name), module);
     let (name, module) = vec::module_export();
     vm.load_native_module(Some(&name), module);
-    let (name, module) = draw::module_export();
-    vm.load_native_module(Some(&name), module);
+    #[cfg(feature = "raylib")]
+    {
+        let (name, module) = draw::module_export();
+        vm.load_native_module(Some(&name), module);
+    }
     let (name, module) = math::module_export();
     vm.load_native_module(Some(&name), module);
     if !only_compile {
@@ -377,6 +381,9 @@ pub struct Chunk {
     pub parameter_num: usize,
     pub num_locals: usize,
     pub is_va: bool,
+    /// Stable identifier assigned by the AOT backend.  The generated native
+    /// dispatcher uses it to select the function that implements this chunk.
+    pub native_id: usize,
 }
 impl Chunk {
     /// Decode the instruction starting at byte offset `pc`.

@@ -45,14 +45,17 @@ fn hello() {
     run_file("sloth/sloth_examples/hello.slt".into(), false, false);
 }
 #[test]
+#[ignore = "reads brainfk source from stdin; run manually"]
 fn brainfk() {
     run_file("sloth/sloth_examples/brainfk.slt".into(), false, false);
 }
 #[test]
+#[ignore = "requires a GUI window; run manually"]
 fn game_of_life() {
     run_file("sloth/sloth_examples/game_of_life.slt".into(), false, false);
 }
 #[test]
+#[ignore = "requires a GUI window; run manually"]
 fn snake() {
     run_file("sloth/sloth_examples/snake.slt".into(), false, false);
 }

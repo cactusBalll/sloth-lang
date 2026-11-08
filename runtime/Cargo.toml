@@ -1,0 +1,11 @@
+[package]
+name = "sloth-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sloth_runtime"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+sloth-lang-core = { path = "..", default-features = false, features = ["nan-boxing"] }
