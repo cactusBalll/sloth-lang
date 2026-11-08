@@ -12,7 +12,7 @@ fn fib_bench0() {
        }
        print(fib(20));
     "#;
-    run_string(prog).unwrap();
+    run_string(prog, false).unwrap();
 }
 #[inline]
 fn fib_bench1() {
@@ -28,7 +28,7 @@ fn fib_bench1() {
        }
        print(fib(20));
     "#;
-    run_string(prog).unwrap();
+    run_string(prog, false).unwrap();
 }
 fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("fib 20", |b| b.iter(fib_bench0));

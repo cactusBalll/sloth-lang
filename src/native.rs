@@ -29,20 +29,20 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
             vm.make_managed_string($s)
         };
     }
-    let v = match val {
-        Value::Nil => vstr!("Nil"),
-        Value::Bool(_) => vstr!("Bool"),
-        Value::Number(_) => vstr!("Number"),
-        Value::String(_) => vstr!("String"),
-        Value::Array(_) => vstr!("Array"),
-        Value::Module(_) => vstr!("Module"),
-        Value::Dictionary(_) => vstr!("Dict"),
-        Value::Error(_) => vstr!("Err"),
-        Value::Closure(_) => vstr!("Closure"),
-        Value::NativeFunction(_) => vstr!("NativeFunction"),
-        Value::OpaqueData(_) => vstr!("OpaqueData"),
-        Value::Fiber(_) => vstr!("Fiber"),
-        Value::Range(_, _) => vstr!("Range"),
+    let v = match val.kind() {
+        ValueKind::Nil => vstr!("Nil"),
+        ValueKind::Bool(_) => vstr!("Bool"),
+        ValueKind::Number(_) => vstr!("Number"),
+        ValueKind::String(_) => vstr!("String"),
+        ValueKind::Array(_) => vstr!("Array"),
+        ValueKind::Module(_) => vstr!("Module"),
+        ValueKind::Dictionary(_) => vstr!("Dict"),
+        ValueKind::Error(_) => vstr!("Err"),
+        ValueKind::Closure(_) => vstr!("Closure"),
+        ValueKind::NativeFunction(_) => vstr!("NativeFunction"),
+        ValueKind::OpaqueData(_) => vstr!("OpaqueData"),
+        ValueKind::Fiber(_) => vstr!("Fiber"),
+        ValueKind::Range(_, _) => vstr!("Range"),
         _ => vstr!("..."),
     };
     vm.get_stack().push(Value::String(v));
@@ -51,7 +51,7 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
 pub fn sloth_add_glob(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // add all kv to Global
     arity_assert!(1, arg_num);
-    let p_dict = if let Value::Dictionary(p_dict) = vm.get_stack().pop().unwrap() {
+    let p_dict = if let ValueKind::Dictionary(p_dict) = vm.get_stack().pop().unwrap().kind() {
         p_dict
     } else {
         panic!("add_glob take 1 argument: dict: Dict");
@@ -71,7 +71,7 @@ pub fn sloth_load_module(vm: &mut Vm, arg_num: usize, _protected: bool) {
         vm.get_stack().push(Value::Nil);
     }
     let path = vm.get_stack().pop().unwrap();
-    if let Value::String(path) = path {
+    if let ValueKind::String(path) = path.kind() {
         vm.get_stack().pop();
         vm.fiber_changed = true;
         let full_path = vm.interpreter_cwd.join(path.get_inner());
@@ -116,15 +116,15 @@ pub fn sloth_to_number(vm: &mut Vm, arg_num: usize, _protected: bool) {
     let val = vm.get_stack().pop().unwrap();
     let _ = vm.get_stack().pop();
 
-    let num = match val {
-        Value::Bool(b) => {
+    let num = match val.kind() {
+        ValueKind::Bool(b) => {
             if b {
                 1.
             } else {
                 0.
             }
         }
-        Value::String(s) => {
+        ValueKind::String(s) => {
             let s1 = s.get_inner();
             if let Ok(num) = s1.parse::<f64>() {
                 num
@@ -174,7 +174,7 @@ pub fn sloth_va_arg(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn sloth_ord(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let s = if let Value::String(s) = vm.get_stack().pop().unwrap() {
+    let s = if let ValueKind::String(s) = vm.get_stack().pop().unwrap().kind() {
         s
     } else {
         panic!("ord take 1 argument: s: String.");
@@ -190,7 +190,7 @@ pub fn sloth_ord(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn sloth_chr(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let v = if let Value::Number(v) = vm.get_stack().pop().unwrap() {
+    let v = if let ValueKind::Number(v) = vm.get_stack().pop().unwrap().kind() {
         v
     } else {
         panic!("chr take 1 argument: v: Number.");
@@ -207,51 +207,51 @@ pub fn sloth_chr(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 fn write_val(buffer: &mut String, val: &Value, visited_loc: &mut HashSet<*mut u8>) -> fmt::Result {
-    match val {
-        Value::Nil => {
+    match val.kind() {
+        ValueKind::Nil => {
             write!(buffer, "Nil")?;
         }
-        Value::Number(x) => {
+        ValueKind::Number(x) => {
             write!(buffer, "{x}")?;
         }
-        Value::Bool(b) => {
+        ValueKind::Bool(b) => {
             write!(buffer, "{b}")?;
         }
 
-        Value::String(s) => {
+        ValueKind::String(s) => {
             write!(buffer, "{s}")?;
         }
-        Value::Array(a) => {
-            if visited_loc.get(&(*a as *mut u8)).is_some() {
+        ValueKind::Array(a) => {
+            if visited_loc.get(&(a as *mut u8)).is_some() {
                 write!(buffer, "...")?;
             } else {
-                visited_loc.insert(*a as *mut u8);
-                write_array(buffer, *a, visited_loc)?;
-                visited_loc.remove(&(*a as *mut u8));
+                visited_loc.insert(a as *mut u8);
+                write_array(buffer, a, visited_loc)?;
+                visited_loc.remove(&(a as *mut u8));
             }
         }
-        Value::Dictionary(d) => {
-            if visited_loc.get(&(*d as *mut u8)).is_some() {
+        ValueKind::Dictionary(d) => {
+            if visited_loc.get(&(d as *mut u8)).is_some() {
                 write!(buffer, "...")?;
             } else {
-                visited_loc.insert(*d as *mut u8);
-                write_dict(buffer, *d, visited_loc)?;
-                visited_loc.remove(&(*d as *mut u8));
+                visited_loc.insert(d as *mut u8);
+                write_dict(buffer, d, visited_loc)?;
+                visited_loc.remove(&(d as *mut u8));
             }
         }
-        Value::Error(d) => {
-            if visited_loc.get(&(*d as *mut u8)).is_some() {
+        ValueKind::Error(d) => {
+            if visited_loc.get(&(d as *mut u8)).is_some() {
                 write!(buffer, "...")?;
             } else {
-                visited_loc.insert(*d as *mut u8);
-                write_dict(buffer, *d, visited_loc)?;
-                visited_loc.remove(&(*d as *mut u8));
+                visited_loc.insert(d as *mut u8);
+                write_dict(buffer, d, visited_loc)?;
+                visited_loc.remove(&(d as *mut u8));
             }
         }
-        Value::Closure(p) => {
+        ValueKind::Closure(p) => {
             write!(buffer, "Closure@{p:?}")?;
         }
-        Value::NativeFunction(p) => {
+        ValueKind::NativeFunction(p) => {
             write!(buffer, "NativeFunc@{p:?}")?;
         }
         v => {
@@ -261,51 +261,51 @@ fn write_val(buffer: &mut String, val: &Value, visited_loc: &mut HashSet<*mut u8
     Ok(())
 }
 fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
-    match val {
-        Value::Nil => {
+    match val.kind() {
+        ValueKind::Nil => {
             print!("Nil")
         }
-        Value::Number(x) => {
+        ValueKind::Number(x) => {
             print!("{x}")
         }
-        Value::Bool(b) => {
+        ValueKind::Bool(b) => {
             print!("{b}")
         }
 
-        Value::String(s) => {
+        ValueKind::String(s) => {
             print!("{s}")
         }
-        Value::Array(a) => {
-            if visited_loc.get(&(*a as *mut u8)).is_some() {
+        ValueKind::Array(a) => {
+            if visited_loc.get(&(a as *mut u8)).is_some() {
                 print!("...");
             } else {
-                visited_loc.insert(*a as *mut u8);
-                print_array(*a, visited_loc);
-                visited_loc.remove(&(*a as *mut u8));
+                visited_loc.insert(a as *mut u8);
+                print_array(a, visited_loc);
+                visited_loc.remove(&(a as *mut u8));
             }
         }
-        Value::Dictionary(d) => {
-            if visited_loc.get(&(*d as *mut u8)).is_some() {
+        ValueKind::Dictionary(d) => {
+            if visited_loc.get(&(d as *mut u8)).is_some() {
                 print!("...");
             } else {
-                visited_loc.insert(*d as *mut u8);
-                print_dict(*d, visited_loc);
-                visited_loc.remove(&(*d as *mut u8));
+                visited_loc.insert(d as *mut u8);
+                print_dict(d, visited_loc);
+                visited_loc.remove(&(d as *mut u8));
             }
         }
-        Value::Error(d) => {
-            if visited_loc.get(&(*d as *mut u8)).is_some() {
+        ValueKind::Error(d) => {
+            if visited_loc.get(&(d as *mut u8)).is_some() {
                 print!("...");
             } else {
-                visited_loc.insert(*d as *mut u8);
-                print_dict(*d, visited_loc);
-                visited_loc.remove(&(*d as *mut u8));
+                visited_loc.insert(d as *mut u8);
+                print_dict(d, visited_loc);
+                visited_loc.remove(&(d as *mut u8));
             }
         }
-        Value::Closure(p) => {
+        ValueKind::Closure(p) => {
             print!("Closure@{p:?}")
         }
-        Value::NativeFunction(p) => {
+        ValueKind::NativeFunction(p) => {
             print!("NativeFunc@{p:?}")
         }
         v => {

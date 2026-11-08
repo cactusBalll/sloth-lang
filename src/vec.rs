@@ -1,4 +1,4 @@
-use crate::{vm::Vm, Value};
+use crate::{vm::Vm, Value, ValueKind};
 
 macro_rules! arity_assert {
     ($n:expr, $arg_num:expr) => {
@@ -16,7 +16,7 @@ macro_rules! mf_entry {
 
 pub fn vec_u8_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let length = if let Value::Number(length) = vm.get_stack().pop().unwrap() {
+    let length = if let ValueKind::Number(length) = vm.get_stack().pop().unwrap().kind() {
         length
     } else {
         panic!("vec_u8_create take 1 parameter: length:Number.")
@@ -31,17 +31,17 @@ pub fn vec_u8_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn vec_u8_set(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(3, arg_num);
-    let val = if let Value::Number(val) = vm.get_stack().pop().unwrap() {
+    let val = if let ValueKind::Number(val) = vm.get_stack().pop().unwrap().kind() {
         val
     } else {
         panic!("vec_u8_set take 3 parameter: clct:OpaqueData, idx:Number, val:Number.")
     };
-    let idx = if let Value::Number(idx) = vm.get_stack().pop().unwrap() {
+    let idx = if let ValueKind::Number(idx) = vm.get_stack().pop().unwrap().kind() {
         idx
     } else {
         panic!("vec_u8_set take 3 parameter: clct:OpaqueData, idx:Number, val:Number.")
     };
-    let clct = if let Value::OpaqueData(clct) = vm.get_stack().pop().unwrap() {
+    let clct = if let ValueKind::OpaqueData(clct) = vm.get_stack().pop().unwrap().kind() {
         clct
     } else {
         panic!("vec_u8_set take 3 parameter: clct:OpaqueData, idx:Number, val:Number.")
@@ -63,12 +63,12 @@ pub fn vec_u8_set(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn vec_u8_get(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(2, arg_num);
-    let idx = if let Value::Number(idx) = vm.get_stack().pop().unwrap() {
+    let idx = if let ValueKind::Number(idx) = vm.get_stack().pop().unwrap().kind() {
         idx
     } else {
         panic!("vec_u8_get take 2 parameter: clct:OpaqueData, idx:Number.")
     };
-    let clct = if let Value::OpaqueData(clct) = vm.get_stack().pop().unwrap() {
+    let clct = if let ValueKind::OpaqueData(clct) = vm.get_stack().pop().unwrap().kind() {
         clct
     } else {
         panic!("vec_u8_get take 2 parameter: clct:OpaqueData, idx:Number.")
@@ -87,7 +87,7 @@ pub fn vec_u8_get(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn vec_u8_len(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let clct = if let Value::OpaqueData(clct) = vm.get_stack().pop().unwrap() {
+    let clct = if let ValueKind::OpaqueData(clct) = vm.get_stack().pop().unwrap().kind() {
         clct
     } else {
         panic!("vec_u8_len take 1 parameter: clct:OpaqueData.")
@@ -102,7 +102,7 @@ pub fn vec_u8_len(vm: &mut Vm, arg_num: usize, _protected: bool) {
 }
 pub fn vec_u8_destroy(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let clct = if let Value::OpaqueData(clct) = vm.get_stack().pop().unwrap() {
+    let clct = if let ValueKind::OpaqueData(clct) = vm.get_stack().pop().unwrap().kind() {
         clct
     } else {
         panic!("vec_u8_destory take 1 parameter: clct: OpaqueData.")
@@ -119,7 +119,7 @@ pub fn vec_u8_destroy(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn vec_u8_from_ascii_string(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let s = if let Value::String(s) = vm.get_stack().pop().unwrap() {
+    let s = if let ValueKind::String(s) = vm.get_stack().pop().unwrap().kind() {
         s
     } else {
         panic!("from_ascii_str take 1 argument: s: String.");

@@ -3,6 +3,7 @@ use interned_string::{IString, StringPool};
 use crate::compiler::scanner::ScannerResult;
 use crate::compiler::Token;
 use crate::*;
+use crate::bytecode;
 use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 pub enum PrattPrecedence {
@@ -60,6 +61,12 @@ pub struct ParserCtx<'a> {
     token_cood: Vec<(usize, usize)>,
     tokens: Vec<Token>,
     pub chunk: Vec<Chunk>, // stack of chunks
+    /// Instructions of every open function while it is being compiled.
+    /// They are assembled into `Chunk::bytecodes` when the function/chunk is
+    /// closed.
+    instrs: Vec<Vec<Instr>>,
+    /// Source line of every instruction in `instrs`.
+    instr_lines: Vec<Vec<usize>>,
 
     func_ctx_stack: Vec<FuncCtx>,
 
@@ -105,6 +112,8 @@ impl<'a> ParserCtx<'a> {
             ptr: 0,
             len: scanner_result.tokens.len(),
             chunk: vec![Chunk::default()],
+            instrs: vec![Vec::new()],
+            instr_lines: vec![Vec::new()],
             tokens: scanner_result.tokens,
             token_cood: scanner_result.cood,
             func_ctx_stack: vec![FuncCtx {
@@ -124,8 +133,14 @@ impl<'a> ParserCtx<'a> {
     }
 
     pub fn finish(mut self) -> ParserResult {
+        let mut chunk = self.chunk.pop().unwrap();
+        let instrs = self.instrs.pop().unwrap();
+        let lines = self.instr_lines.pop().unwrap();
+        let (bytecodes, lines) = bytecode::encode_instrs(&instrs, &lines);
+        chunk.bytecodes = bytecodes;
+        chunk.lines = lines;
         ParserResult {
-            chunk: self.chunk.pop().unwrap(),
+            chunk,
             exported_symbols: self.exported_symbols,
         }
     }
@@ -165,7 +180,7 @@ impl<'a> ParserCtx<'a> {
                         .last_mut()
                         .unwrap()
                         .break_patch_point
-                        .push(self.chunk[self.depth].bytecodes.len());
+                        .push(self.instrs[self.depth].len());
                 }
             }
             Token::Continue => {
@@ -182,7 +197,7 @@ impl<'a> ParserCtx<'a> {
                         .last_mut()
                         .unwrap()
                         .continue_patch_point
-                        .push(self.chunk[self.depth].bytecodes.len());
+                        .push(self.instrs[self.depth].len());
                 }
             }
             Token::Var => {
@@ -337,9 +352,9 @@ impl<'a> ParserCtx<'a> {
         self.parse_rval_expr(PrattPrecedence::Lowest)?;
         self.consume(Token::RParen)?;
         self.emit(Instr::Iterator);
-        let loop_start_point = self.chunk[self.depth].bytecodes.len();
+        let loop_start_point = self.instrs[self.depth].len();
         self.emit(Instr::Next);
-        let backpatch_point = self.chunk[self.depth].bytecodes.len();
+        let backpatch_point = self.instrs[self.depth].len();
         self.emit(Instr::Nop);
         self.emit(Instr::SetLocal(iter_var_slot));
         // self.emit(Instr::Pop);
@@ -348,10 +363,10 @@ impl<'a> ParserCtx<'a> {
         self.parse_stmt_list()?;
         self.consume(Token::RBrace)?;
         self.emit(Instr::Jump(
-            loop_start_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
+            loop_start_point as i32 - self.instrs[self.depth].len() as i32,
         ));
-        self.chunk[self.depth].bytecodes[backpatch_point] = Instr::JumpIfNot(
-            self.chunk[self.depth].bytecodes.len() as i32 - backpatch_point as i32,
+        self.instrs[self.depth][backpatch_point] = Instr::JumpIfNot(
+            self.instrs[self.depth].len() as i32 - backpatch_point as i32,
         );
         // pop Nil
         self.emit(Instr::Pop);
@@ -519,9 +534,9 @@ impl<'a> ParserCtx<'a> {
     fn parse_while(&mut self) -> Result<(), String> {
         self.consume(Token::While)?;
         self.consume(Token::LParen)?;
-        let jumpback_point = self.chunk[self.depth].bytecodes.len();
+        let jumpback_point = self.instrs[self.depth].len();
         self.parse_rval_expr(PrattPrecedence::Lowest)?;
-        let patch_point = self.chunk[self.depth].bytecodes.len();
+        let patch_point = self.instrs[self.depth].len();
         self.emit(Instr::Nop); // to be patched
         self.emit(Instr::Pop);
         self.consume(Token::RParen)?;
@@ -543,22 +558,22 @@ impl<'a> ParserCtx<'a> {
             .unwrap();
         // patch continue points, jump to loop header
         for continue_point in cur_loop_ctx.continue_patch_point.iter() {
-            self.chunk[self.depth].bytecodes[*continue_point] =
+            self.instrs[self.depth][*continue_point] =
                 Instr::Jump(jumpback_point as i32 - *continue_point as i32);
         }
         self.func_ctx_stack.last_mut().unwrap().loop_ctx = false;
         self.emit(Instr::Jump(
-            jumpback_point as i32 - self.chunk[self.depth].bytecodes.len() as i32,
+            jumpback_point as i32 - self.instrs[self.depth].len() as i32,
         ));
         self.close_block();
         self.consume(Token::RBrace)?;
-        self.chunk[self.depth].bytecodes[patch_point] =
-            Instr::JumpIfNot(self.chunk[self.depth].bytecodes.len() as i32 - patch_point as i32);
+        self.instrs[self.depth][patch_point] =
+            Instr::JumpIfNot(self.instrs[self.depth].len() as i32 - patch_point as i32);
         self.emit(Instr::Pop);
         // patch break points, jump to end of loop
         for break_point in cur_loop_ctx.break_patch_point.iter() {
-            self.chunk[self.depth].bytecodes[*break_point] =
-                Instr::Jump(self.chunk[self.depth].bytecodes.len() as i32 - *break_point as i32);
+            self.instrs[self.depth][*break_point] =
+                Instr::Jump(self.instrs[self.depth].len() as i32 - *break_point as i32);
         }
 
         Ok(())
@@ -592,7 +607,7 @@ impl<'a> ParserCtx<'a> {
         self.consume(Token::If)?;
         self.consume(Token::LParen)?;
         self.parse_rval_expr(PrattPrecedence::Lowest)?;
-        let patch_point = self.chunk[self.depth].bytecodes.len();
+        let patch_point = self.instrs[self.depth].len();
         // emit an empty slot, jump to FALSE branch but FALSE branch is now not parsed.
         self.emit(Instr::Nop);
         // pop the bool value
@@ -601,21 +616,21 @@ impl<'a> ParserCtx<'a> {
         // self.consume(Token::LBrace)?;
         // self.open_block();
         self.parse()?;
-        let patch_point2 = self.chunk[self.depth].bytecodes.len();
+        let patch_point2 = self.instrs[self.depth].len();
 
         // emit an empty slot, jump to end of if statement, but we still don't know if there
         // is an else clause.
         self.emit(Instr::Nop);
         // self.close_block();
         // self.consume(Token::RBrace)?;
-        self.chunk[self.depth].bytecodes[patch_point] =
-            Instr::JumpIfNot((self.chunk[self.depth].bytecodes.len() - patch_point) as i32);
+        self.instrs[self.depth][patch_point] =
+            Instr::JumpIfNot((self.instrs[self.depth].len() - patch_point) as i32);
         if let Some(tok) = self.peek() {
             if Token::Else == tok {
                 self.advance();
                 self.parse()?;
-                self.chunk[self.depth].bytecodes[patch_point2] =
-                    Instr::Jump((self.chunk[self.depth].bytecodes.len() - patch_point2) as i32);
+                self.instrs[self.depth][patch_point2] =
+                    Instr::Jump((self.instrs[self.depth].len() - patch_point2) as i32);
             }
         }
         // just leave the value on the stack, clean it at last
@@ -626,6 +641,8 @@ impl<'a> ParserCtx<'a> {
     #[inline]
     fn open_env(&mut self) {
         self.chunk.push(Chunk::default());
+        self.instrs.push(Vec::new());
+        self.instr_lines.push(Vec::new());
         self.func_ctx_stack.push(FuncCtx::default());
         self.func_ctx_stack
             .last_mut()
@@ -640,7 +657,13 @@ impl<'a> ParserCtx<'a> {
         self.emit_with_line(Instr::Return, 0);
         self.depth -= 1;
         self.func_ctx_stack.pop();
-        self.chunk.pop().unwrap()
+        let mut chunk = self.chunk.pop().unwrap();
+        let instrs = self.instrs.pop().unwrap();
+        let lines = self.instr_lines.pop().unwrap();
+        let (bytecodes, lines) = bytecode::encode_instrs(&instrs, &lines);
+        chunk.bytecodes = bytecodes;
+        chunk.lines = lines;
+        chunk
     }
     /// open block level env
     #[inline]
@@ -741,7 +764,7 @@ impl<'a> ParserCtx<'a> {
                 // consume '='
                 self.advance();
                 // change get operation to corresponging set operation
-                let last_instr = self.chunk[self.depth].bytecodes.pop().unwrap();
+                let last_instr = self.instrs[self.depth].pop().unwrap();
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 // now value is on the top of stack
                 let modified_instr = match last_instr {
@@ -944,7 +967,7 @@ impl<'a> ParserCtx<'a> {
                 self.emit_with_line(Instr::GetCollection(1), line);
                 continue;
             }
-            let backpatch_point: usize = self.chunk[self.depth].bytecodes.len();
+            let backpatch_point: usize = self.instrs[self.depth].len();
             let nprec = get_precedence(&tk);
             if nprec != PrattPrecedence::None {
                 if get_precedence(&tk) <= prec {
@@ -995,16 +1018,16 @@ impl<'a> ParserCtx<'a> {
                     self.emit_with_line(Instr::Ne, line);
                 }
                 Token::And => {
-                    let pos = self.chunk[self.depth].bytecodes.len();
-                    self.chunk[self.depth].bytecodes[backpatch_point] =
+                    let pos = self.instrs[self.depth].len();
+                    self.instrs[self.depth][backpatch_point] =
                         Instr::JumpIfNot((pos - backpatch_point) as i32);
-                    self.chunk[self.depth].lines[backpatch_point] = line;
+                    self.instr_lines[self.depth][backpatch_point] = line;
                 }
                 Token::Or => {
-                    let pos = self.chunk[self.depth].bytecodes.len();
-                    self.chunk[self.depth].bytecodes[backpatch_point] =
+                    let pos = self.instrs[self.depth].len();
+                    self.instrs[self.depth][backpatch_point] =
                         Instr::JumpIfTrue((pos - backpatch_point) as i32);
-                    self.chunk[self.depth].lines[backpatch_point] = line;
+                    self.instr_lines[self.depth][backpatch_point] = line;
                 }
                 Token::Dots => {
                     self.emit_with_line(Instr::MakeRange, line);
@@ -1119,19 +1142,18 @@ impl<'a> ParserCtx<'a> {
     }
     #[inline]
     fn emit(&mut self, instr: Instr) {
-        self.chunk[self.depth].bytecodes.push(instr);
+        self.instrs[self.depth].push(instr);
         if self.ptr >= self.len {
-            self.chunk[self.depth].lines.push(self.token_cood.last().unwrap().0);
+            self.instr_lines[self.depth].push(self.token_cood.last().unwrap().0);
         } else {
-            self.chunk[self.depth]
-                .lines
+            self.instr_lines[self.depth]
                 .push(self.token_cood[self.ptr].0);
         }
     }
     #[inline]
     fn emit_with_line(&mut self, instr: Instr, line: usize) {
-        self.chunk[self.depth].bytecodes.push(instr);
-        self.chunk[self.depth].lines.push(line);
+        self.instrs[self.depth].push(instr);
+        self.instr_lines[self.depth].push(line);
     }
     #[inline]
     fn push_constant(&mut self, c: Value) -> usize {
@@ -1140,7 +1162,7 @@ impl<'a> ParserCtx<'a> {
     }
     fn push_unique_number(&mut self, v: f64) -> usize {
         for (i, c) in self.chunk[self.depth].constants.iter().enumerate() {
-            if let Value::Number(v1) = c {
+            if let ValueKind::Number(v1) = c.kind() {
                 if (v - v1).abs() < f64::EPSILON {
                     return i;
                 }
@@ -1152,8 +1174,8 @@ impl<'a> ParserCtx<'a> {
 
     fn push_unique_string(&mut self, s: &IString) -> usize {
         for (i, c) in self.chunk[self.depth].constants.iter().enumerate() {
-            if let Value::String(s1) = c {
-                if s == s1 {
+            if let ValueKind::String(s1) = c.kind() {
+                if s == &s1 {
                     return i;
                 }
             }

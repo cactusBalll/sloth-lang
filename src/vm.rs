@@ -83,14 +83,20 @@ impl CallFrame {
             discard_return_value: false,
         }
     }
-    fn decode(&self) -> Instr {
+    fn decode(&self) -> Result<(Instr, usize), u8> {
         unsafe {
             let chunk = &*(*self.closure).chunk;
-            chunk.bytecodes[self.pc]
+            chunk.decode(self.pc)
         }
     }
     fn nxt(&mut self) {
-        self.pc += 1;
+        let len = match self.decode() {
+            Ok((_, len)) => len,
+            // Let the main loop report the malformed instruction.  Advancing by
+            // one keeps `pc_add` from looping forever.
+            Err(_) => 1,
+        };
+        self.pc += len;
     }
     fn jump(&mut self, offset: i32) {
         self.pc = (self.pc as i32 + offset) as usize;
@@ -160,7 +166,16 @@ impl Vm {
             let call_frame = unsafe { (*self.executing_fiber).call_frames.last_mut().unwrap() };
             let closure = call_frame.closure;
             let mut stack = unsafe { &mut (*self.executing_fiber).stack };
-            let instr = unsafe { (&*(&*call_frame.closure).chunk).bytecodes[call_frame.pc] };
+            let instr = match unsafe { (&*(&*call_frame.closure).chunk).decode(call_frame.pc) } {
+                Ok((instr, _len)) => instr,
+                Err(opcode) => {
+                    return Err(EvalError::Error(
+                        self.eval_err_str(
+                            format!("unknown or truncated instruction {opcode:#04x}").as_ref(),
+                        ),
+                    ))
+                }
+            };
             let pc = call_frame.pc;
             if self.debug {
                 dbg!(&instr);
@@ -181,9 +196,9 @@ impl Vm {
                 Instr::Add => {
                     let opr2 = stack.pop().unwrap();
                     let opr1 = stack.pop().unwrap();
-                    match opr1 {
-                        Value::Number(a) => {
-                            if let Value::Number(b) = opr2 {
+                    match opr1.kind() {
+                        ValueKind::Number(a) => {
+                            if let ValueKind::Number(b) = opr2.kind() {
                                 let res = a + b;
                                 stack.push(Value::Number(res));
                             } else {
@@ -193,8 +208,8 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::String(a) => {
-                            if let Value::String(b) = opr2 {
+                        ValueKind::String(a) => {
+                            if let ValueKind::String(b) = opr2.kind() {
                                 let mut res = a.get_inner().to_owned();
                                 res += b.get_inner();
                                 let istring = self.string_pool.creat_istring(&res);
@@ -206,8 +221,8 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Array(a) => {
-                            if let Value::Array(b) = opr2 {
+                        ValueKind::Array(a) => {
+                            if let ValueKind::Array(b) = opr2.kind() {
                                 unsafe {
                                     let mut new_arr = Vec::new();
                                     (*a).array.iter().for_each(|x| new_arr.push(x.clone()));
@@ -227,7 +242,7 @@ impl Vm {
                                 ));
                             }
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             // a + b => a.__add__(b)
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__add__");
@@ -239,8 +254,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -270,9 +285,9 @@ impl Vm {
                 Instr::Sub => {
                     let opr2 = stack.pop().unwrap();
                     let opr1 = stack.pop().unwrap();
-                    match opr1 {
-                        Value::Number(a) => {
-                            if let Value::Number(b) = opr2 {
+                    match opr1.kind() {
+                        ValueKind::Number(a) => {
+                            if let ValueKind::Number(b) = opr2.kind() {
                                 let res = a - b;
                                 stack.push(Value::Number(res));
                             } else {
@@ -282,7 +297,7 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             // a + b => a.__add__(b)
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__sub__");
@@ -294,8 +309,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -325,9 +340,9 @@ impl Vm {
                 Instr::Mul => {
                     let opr2 = stack.pop().unwrap();
                     let opr1 = stack.pop().unwrap();
-                    match opr1 {
-                        Value::Number(a) => {
-                            if let Value::Number(b) = opr2 {
+                    match opr1.kind() {
+                        ValueKind::Number(a) => {
+                            if let ValueKind::Number(b) = opr2.kind() {
                                 let res = a * b;
                                 stack.push(Value::Number(res));
                             } else {
@@ -337,7 +352,7 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             // a + b => a.__add__(b)
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__mul__");
@@ -349,8 +364,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -380,9 +395,9 @@ impl Vm {
                 Instr::Div => {
                     let opr2 = stack.pop().unwrap();
                     let opr1 = stack.pop().unwrap();
-                    match opr1 {
-                        Value::Number(a) => {
-                            if let Value::Number(b) = opr2 {
+                    match opr1.kind() {
+                        ValueKind::Number(a) => {
+                            if let ValueKind::Number(b) = opr2.kind() {
                                 if b < 1e-5 {
                                     return Err(EvalError::ArithmError(
                                         self.eval_err_str("div by 0"),
@@ -397,7 +412,7 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             // a + b => a.__add__(b)
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__div__");
@@ -409,8 +424,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -440,9 +455,9 @@ impl Vm {
                 Instr::Mod => {
                     let opr2 = stack.pop().unwrap();
                     let opr1 = stack.pop().unwrap();
-                    match opr1 {
-                        Value::Number(a) => {
-                            if let Value::Number(b) = opr2 {
+                    match opr1.kind() {
+                        ValueKind::Number(a) => {
+                            if let ValueKind::Number(b) = opr2.kind() {
                                 if b < 1e-5 {
                                     return Err(EvalError::ArithmError(
                                         self.eval_err_str("div by 0"),
@@ -457,7 +472,7 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             // a + b => a.__add__(b)
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__mod__");
@@ -469,8 +484,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -499,12 +514,12 @@ impl Vm {
                 }
                 Instr::Negate => {
                     let opr1 = stack.pop().unwrap();
-                    match opr1 {
-                        Value::Number(a) => {
+                    match opr1.kind() {
+                        ValueKind::Number(a) => {
                             stack.push(Value::Number(-a));
                             self.pc_add();
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             // -a => a.__neg__()
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__neg__");
@@ -516,8 +531,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -571,13 +586,13 @@ impl Vm {
                 }
                 Instr::Not => {
                     let opr1 = self.get_stack().pop().unwrap();
-                    match opr1 {
-                        Value::Bool(a) => {
+                    match opr1.kind() {
+                        ValueKind::Bool(a) => {
                             let res = !a;
                             self.get_stack().push(Value::Bool(res));
                             self.pc_add();
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             // not a -> a.__not__()
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__not__");
@@ -589,8 +604,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -627,8 +642,8 @@ impl Vm {
                     self.pc_add();
                 }
                 Instr::ClassIs => {
-                    if let Value::Klass(klass) = stack.pop().unwrap() {
-                        if let Value::Instance(instance) = stack.pop().unwrap() {
+                    if let ValueKind::Klass(klass) = stack.pop().unwrap().kind() {
+                        if let ValueKind::Instance(instance) = stack.pop().unwrap().kind() {
                             unsafe {
                                 let mut p_klass = (*instance).klass;
                                 let mut is_class = false;
@@ -739,7 +754,7 @@ impl Vm {
                 Instr::GetGlobal(x) => {
                     let call_frame = call_frame;
                     let idx = unsafe { (&*(&*call_frame.closure).chunk).constants[x].clone() };
-                    if let Value::String(idx) = idx {
+                    if let ValueKind::String(idx) = idx.kind() {
                         // dbg!(&idx);
                         let val = self.global.last().unwrap()[&idx].clone();
                         stack.push(val);
@@ -752,7 +767,7 @@ impl Vm {
                     let call_frame = call_frame;
                     let idx = unsafe { (&*(&*call_frame.closure).chunk).constants[x].clone() };
                     let v = stack.pop().unwrap();
-                    if let Value::String(idx) = idx {
+                    if let ValueKind::String(idx) = idx.kind() {
                         self.global.last_mut().unwrap().insert(idx, v);
                         self.pc_add();
                     } else {
@@ -798,10 +813,10 @@ impl Vm {
                 Instr::GetCollection(va) => {
                     let idx = stack.pop().unwrap();
                     let clct = stack.pop().unwrap();
-                    match clct {
-                        Value::Array(p_array) => {
+                    match clct.kind() {
+                        ValueKind::Array(p_array) => {
                             if va == 0 {
-                                if let Value::Number(i) = idx {
+                                if let ValueKind::Number(i) = idx.kind() {
                                     if i < 0. {
                                         return Err(EvalError::IndexOutOfBound(self.eval_err_str(
                                             "Array cannot be indexed by negative value",
@@ -826,7 +841,7 @@ impl Vm {
                             } else if va == 1 {
                                 // `methods` on Array
                                 stack.push(clct);
-                                if let Value::String(s) = idx {
+                                if let ValueKind::String(s) = idx.kind() {
                                     let ext_name = self
                                         .get_builtin_type_extension_name("Array", s.get_inner());
                                     let ext_method = self.global.last().unwrap()[&ext_name].clone();
@@ -839,8 +854,8 @@ impl Vm {
                                 }
                             }
                         }
-                        Value::Dictionary(p_dict) => {
-                            if let Value::String(s) = idx {
+                        ValueKind::Dictionary(p_dict) => {
+                            if let ValueKind::String(s) = idx.kind() {
                                 let m = unsafe { &mut *p_dict };
                                 if let Some(v) = m.dict.get(&s) {
                                     stack.push(v.clone());
@@ -856,8 +871,8 @@ impl Vm {
                                 ));
                             }
                         }
-                        Value::Error(p_dict) => {
-                            if let Value::String(i) = idx {
+                        ValueKind::Error(p_dict) => {
+                            if let ValueKind::String(i) = idx.kind() {
                                 let dict = unsafe { &mut *p_dict };
                                 let elem = dict.dict.get(&i).unwrap_or(&Value::Nil).clone();
                                 stack.push(elem);
@@ -868,14 +883,14 @@ impl Vm {
                                 ));
                             }
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             if va == 0 {
                                 let protocol_name = self.string_pool.creat_istring("__index__");
                                 if let Some(method) =
                                     unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -894,7 +909,7 @@ impl Vm {
                                     ));
                                 }
                             } else {
-                                if let Value::String(i) = idx {
+                                if let ValueKind::String(i) = idx.kind() {
                                     let instance = unsafe { &mut *p_instance };
                                     if let Some(v) = instance.fields.get(&i) {
                                         stack.push(v.clone());
@@ -903,9 +918,9 @@ impl Vm {
                                         if let Some(method) =
                                             unsafe { (*instance.klass).methods.get(&i) }
                                         {
-                                            if let Value::Closure(method) = method {
+                                            if let ValueKind::Closure(method) = method.kind() {
                                                 let mut binded_closure =
-                                                    unsafe { (**method).clone() };
+                                                    unsafe { (*method).clone() };
                                                 binded_closure.this_ref = Some(p_instance);
                                                 let mut b_binded_closure = Box::new(binded_closure);
                                                 let p_binded_closure =
@@ -930,8 +945,8 @@ impl Vm {
                                 }
                             }
                         }
-                        Value::Module(p_module) => {
-                            if let Value::String(s) = idx {
+                        ValueKind::Module(p_module) => {
+                            if let ValueKind::String(s) = idx.kind() {
                                 let m = unsafe { &mut *p_module };
                                 if let Some(v) = m.dict.get(&s) {
                                     stack.push(v.clone());
@@ -958,9 +973,9 @@ impl Vm {
                     let val = stack.pop().unwrap();
                     let idx = stack.pop().unwrap();
                     let clct = stack.pop().unwrap();
-                    match clct {
-                        Value::Array(p_array) => {
-                            if let Value::Number(i) = idx {
+                    match clct.kind() {
+                        ValueKind::Array(p_array) => {
+                            if let ValueKind::Number(i) = idx.kind() {
                                 if i < 0. {
                                     return Err(EvalError::IndexOutOfBound(self.eval_err_str(
                                         "Array cannot be indexed by negative value",
@@ -982,8 +997,8 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Dictionary(p_dict) => {
-                            if let Value::String(i) = idx {
+                        ValueKind::Dictionary(p_dict) => {
+                            if let ValueKind::String(i) = idx.kind() {
                                 let dict = unsafe { &mut *p_dict };
                                 if let Some(elem) = dict.dict.get_mut(&i) {
                                     *elem = val;
@@ -997,8 +1012,8 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Error(p_dict) => {
-                            if let Value::String(i) = idx {
+                        ValueKind::Error(p_dict) => {
+                            if let ValueKind::String(i) = idx.kind() {
                                 let dict = unsafe { &mut *p_dict };
                                 if let Some(elem) = dict.dict.get_mut(&i) {
                                     *elem = val;
@@ -1012,15 +1027,15 @@ impl Vm {
                             }
                             self.pc_add();
                         }
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             if va == 0 {
                                 // this.__assign__(idx, val)
                                 let protocol_name = self.string_pool.creat_istring("__assign__");
                                 if let Some(method) =
                                     unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -1040,7 +1055,7 @@ impl Vm {
                                     ));
                                 }
                             } else {
-                                if let Value::String(i) = idx {
+                                if let ValueKind::String(i) = idx.kind() {
                                     let instance = unsafe { &mut *p_instance };
                                     instance.fields.insert(i.clone(), val);
                                 } else {
@@ -1085,23 +1100,23 @@ impl Vm {
                 }
 
                 Instr::Iterator => {
-                    match stack.pop().unwrap() {
-                        Value::Range(l, r) => {
+                    match stack.pop().unwrap().kind() {
+                        ValueKind::Range(l, r) => {
                             let v = Value::Range(l, r);
                             stack.push(v);
                             self.pc_add();
                         }
-                        Value::String(istring) => {
+                        ValueKind::String(istring) => {
                             let v = Value::StringIter(istring.clone(), 0);
                             stack.push(v);
                             self.pc_add();
                         }
-                        Value::Array(array) => {
+                        ValueKind::Array(array) => {
                             let v = Value::ArrayIter(array, 0);
                             stack.push(v);
                             self.pc_add();
                         }
-                        Value::Dictionary(dict) => unsafe {
+                        ValueKind::Dictionary(dict) => unsafe {
                             // [[k,v], [k,v], [k,v],...]
                             let kv_arr = (*dict)
                                 .dict
@@ -1127,7 +1142,7 @@ impl Vm {
                             stack.push(v);
                             self.pc_add();
                         },
-                        Value::Instance(p_instance) => {
+                        ValueKind::Instance(p_instance) => {
                             let instance = unsafe { &mut *p_instance };
                             let protocol_func_name = self.string_pool.creat_istring("__iter__");
                             if let Some(v) = instance.fields.get(&protocol_func_name) {
@@ -1138,8 +1153,8 @@ impl Vm {
                                 if let Some(method) =
                                     unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                                 {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -1166,88 +1181,104 @@ impl Vm {
                     };
                 }
 
-                Instr::Next => match stack.last_mut().unwrap() {
-                    Value::Range(l, r) => {
-                        let v = if (*l - *r).abs() < f64::EPSILON {
-                            Value::Nil
-                        } else if l < r {
-                            *l += 1.;
-                            Value::Number(*l - 1.)
-                        } else if l > r {
-                            *l -= 1.;
-                            Value::Number(*l + 1.)
-                        } else {
-                            unreachable!()
-                        };
-                        stack.push(v);
-                        self.pc_add();
-                    }
-                    Value::ArrayIter(arr, i) => unsafe {
-                        if *i >= (**arr).array.len() {
-                            stack.push(Value::Nil);
-                            self.pc_add();
-                        } else {
-                            let v = (&mut **arr).array[*i].clone();
-                            *i += 1;
-                            stack.push(v);
-                            self.pc_add();
-                        }
-                    },
-                    Value::StringIter(s, i) => {
-                        // performance?
-                        let c = s.get_inner().chars().skip(*i).next();
-                        if let Some(c) = c {
-                            *i += 1;
-                            let s = format!("{c}");
-                            stack.push(Value::String(self.string_pool.creat_istring(&s)));
-                            self.pc_add();
-                        } else {
-                            stack.push(Value::Nil);
-                            self.pc_add();
-                        }
-                    }
-                    Value::Instance(p_instance) => {
-                        let instance = unsafe { &mut **p_instance };
-                        let protocol_func_name = self.string_pool.creat_istring("__next__");
-                        if let Some(v) = instance.fields.get(&protocol_func_name) {
-                            let v = v.clone();
-                            stack.push(v);
-                            self.pc_add();
-                        } else {
-                            if let Some(method) =
-                                unsafe { (*instance.klass).methods.get(&protocol_func_name) }
-                            {
-                                if let Value::Closure(method) = method {
-                                    let mut binded_closure = unsafe { (**method).clone() };
-                                    binded_closure.this_ref = Some(*p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
-                                    self.call_routine(0)?;
-                                } else {
-                                    unreachable!()
-                                }
+                Instr::Next => {
+                    let mut iterator = stack.pop().unwrap();
+                    match iterator.kind() {
+                        ValueKind::Range(l, r) => {
+                            let v = if (l - r).abs() < f64::EPSILON {
+                                Value::Nil
+                            } else if l < r {
+                                let next = l + 1.;
+                                iterator = Value::Range(next, r);
+                                Value::Number(next - 1.)
+                            } else if l > r {
+                                let next = l - 1.;
+                                iterator = Value::Range(next, r);
+                                Value::Number(next + 1.)
                             } else {
-                                return Err(EvalError::VariableNotFound(
-                                    self.eval_err_str("method not found"),
-                                ));
+                                unreachable!()
+                            };
+                            stack.push(iterator);
+                            stack.push(v);
+                            self.pc_add();
+                        }
+                        ValueKind::ArrayIter(arr, i) => unsafe {
+                            if i >= (*arr).array.len() {
+                                stack.push(iterator);
+                                stack.push(Value::Nil);
+                                self.pc_add();
+                            } else {
+                                let v = (&mut *arr).array[i].clone();
+                                iterator = Value::ArrayIter(arr, i + 1);
+                                stack.push(iterator);
+                                stack.push(v);
+                                self.pc_add();
                             }
-                        };
+                        },
+                        ValueKind::StringIter(s, i) => {
+                            // performance?
+                            let c = s.get_inner().chars().skip(i).next();
+                            if let Some(c) = c {
+                                let next = format!("{c}");
+                                iterator = Value::StringIter(s, i + 1);
+                                stack.push(iterator);
+                                stack.push(Value::String(
+                                    self.string_pool.creat_istring(&next),
+                                ));
+                                self.pc_add();
+                            } else {
+                                stack.push(iterator);
+                                stack.push(Value::Nil);
+                                self.pc_add();
+                            }
+                        }
+                        ValueKind::Instance(p_instance) => {
+                            // The iterator object stays below the value/call
+                            // frame and is advanced in place by `__next__`.
+                            stack.push(iterator);
+                            let instance = unsafe { &mut *p_instance };
+                            let protocol_func_name =
+                                self.string_pool.creat_istring("__next__");
+                            if let Some(v) = instance.fields.get(&protocol_func_name) {
+                                let v = v.clone();
+                                stack.push(v);
+                                self.pc_add();
+                            } else {
+                                if let Some(method) =
+                                    unsafe { (*instance.klass).methods.get(&protocol_func_name) }
+                                {
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
+                                        binded_closure.this_ref = Some(p_instance);
+                                        let mut b_binded_closure = Box::new(binded_closure);
+                                        let p_binded_closure =
+                                            b_binded_closure.as_mut() as *mut Closure;
+                                        self.objects.push(b_binded_closure);
+                                        let f = Value::Closure(p_binded_closure);
+                                        stack.push(f);
+                                        self.call_routine(0)?;
+                                    } else {
+                                        unreachable!()
+                                    }
+                                } else {
+                                    return Err(EvalError::VariableNotFound(
+                                        self.eval_err_str("method not found"),
+                                    ));
+                                }
+                            };
+                        }
+                        _ => {
+                            return Err(EvalError::VariableNotFound(
+                                self.eval_err_str("not a Iterator Object"),
+                            ));
+                        }
                     }
-                    _ => {
-                        return Err(EvalError::VariableNotFound(
-                            self.eval_err_str("not a Iterator Object"),
-                        ));
-                    }
-                },
+                }
                 Instr::Call(x) => {
                     let val = &stack[stack.len() - x - 1];
-                    if let Value::Closure(p_closure) = val {
+                    if let ValueKind::Closure(p_closure) = val.kind() {
                         let mut packed_va_list = Vec::new();
-                        let chunk = unsafe { &*((**p_closure).chunk) };
+                        let chunk = unsafe { &*((*p_closure).chunk) };
                         if chunk.parameter_num != x {
                             if chunk.parameter_num < x && chunk.is_va {
                                 for idx in (stack.len() - x + chunk.parameter_num)..stack.len() {
@@ -1266,7 +1297,7 @@ impl Vm {
                             }
                         }
                         let call_frame =
-                            CallFrame::new(stack.len() - x, *p_closure, packed_va_list);
+                            CallFrame::new(stack.len() - x, p_closure, packed_va_list);
                         // va_list arg should be pop
                         for _ in 0..x - chunk.parameter_num {
                             stack.pop();
@@ -1277,20 +1308,20 @@ impl Vm {
                         unsafe {
                             (*self.executing_fiber).call_frames.push(call_frame);
                         }
-                    } else if let Value::Klass(klass) = val {
+                    } else if let ValueKind::Klass(klass) = val.kind() {
                         let class_idx = stack.len() - x - 1;
 
                         let mut b_instace = Box::new(Instance {
                             marked: false,
-                            klass: *klass,
+                            klass,
                             fields: HashMap::new(),
                         });
                         let p_instance = b_instace.as_mut() as *mut Instance;
                         self.objects.push(b_instace);
                         let idx = self.string_pool.creat_istring("__init__");
-                        if let Some(method) = unsafe { (**klass).methods.get(&idx) } {
-                            if let Value::Closure(method) = method {
-                                let mut binded_closure = unsafe { (**method).clone() };
+                        if let Some(method) = unsafe { (*klass).methods.get(&idx) } {
+                            if let ValueKind::Closure(method) = method.kind() {
+                                let mut binded_closure = unsafe { (*method).clone() };
                                 binded_closure.this_ref = Some(p_instance);
                                 let mut b_binded_closure = Box::new(binded_closure);
                                 let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
@@ -1311,8 +1342,8 @@ impl Vm {
                             stack.push(Value::Instance(p_instance));
                             self.pc_add();
                         }
-                    } else if let Value::NativeFunction(f) = val {
-                        let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(*f) };
+                    } else if let ValueKind::NativeFunction(f) = val.kind() {
+                        let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
                         //println!("{:?}", native::sloth_print as *mut u8);
 
                         f(self, x, false);
@@ -1372,7 +1403,7 @@ impl Vm {
 
                     if !self.protected || unsafe { (*self.executing_fiber).call_frames.is_empty() }
                     {
-                        if let Value::Error(p_dict) = stack.pop().unwrap() {
+                        if let ValueKind::Error(p_dict) = stack.pop().unwrap().kind() {
                             let mut hash_map = unsafe { (*p_dict).dict.clone() };
                             return Err(EvalError::Exception(HashMap::from_iter(
                                 hash_map.iter().map(|(k, v)| (k.to_string(), v.clone())),
@@ -1457,15 +1488,15 @@ impl Vm {
                 Instr::GetSuperMethod => {
                     let idx = stack.pop().unwrap();
                     let clct = stack.pop().unwrap();
-                    if let Value::Instance(p_instance) = clct {
-                        if let Value::String(i) = idx {
+                    if let ValueKind::Instance(p_instance) = clct.kind() {
+                        if let ValueKind::String(i) = idx.kind() {
                             let instance = unsafe { &mut *p_instance };
                             let mut super_class = unsafe { (*instance.klass).super_klass };
                             let mut ok = false;
                             while super_class != ptr::null_mut() {
                                 if let Some(method) = unsafe { (*super_class).methods.get(&i) } {
-                                    if let Value::Closure(method) = method {
-                                        let mut binded_closure = unsafe { (**method).clone() };
+                                    if let ValueKind::Closure(method) = method.kind() {
+                                        let mut binded_closure = unsafe { (*method).clone() };
                                         binded_closure.this_ref = Some(p_instance);
                                         let mut b_binded_closure = Box::new(binded_closure);
                                         let p_binded_closure =
@@ -1508,8 +1539,8 @@ impl Vm {
                 Instr::ClassExtend => {
                     let super_klass = stack.pop().unwrap();
                     let klass = stack.pop().unwrap();
-                    if let Value::Klass(klass) = klass {
-                        if let Value::Klass(super_klass) = super_klass {
+                    if let ValueKind::Klass(klass) = klass.kind() {
+                        if let ValueKind::Klass(super_klass) = super_klass.kind() {
                             unsafe {
                                 (*klass).super_klass = super_klass;
                                 // copy down methods
@@ -1532,9 +1563,9 @@ impl Vm {
                     let method = stack.pop().unwrap();
                     let name = stack.pop().unwrap();
                     let klass = stack.pop().unwrap();
-                    if let Value::Klass(klass) = klass {
-                        if let Value::String(name) = name {
-                            if let Value::Closure(method) = method {
+                    if let ValueKind::Klass(klass) = klass.kind() {
+                        if let ValueKind::String(name) = name.kind() {
+                            if let ValueKind::Closure(method) = method.kind() {
                                 unsafe {
                                     (*klass).methods.insert(name, Value::Closure(method));
                                 }
@@ -1581,9 +1612,9 @@ impl Vm {
     ) -> Result<(), EvalError> {
         let opr2 = self.get_stack().pop().unwrap();
         let opr1 = self.get_stack().pop().unwrap();
-        match opr1 {
-            Value::Number(a) => {
-                if let Value::Number(b) = opr2 {
+        match opr1.kind() {
+            ValueKind::Number(a) => {
+                if let ValueKind::Number(b) = opr2.kind() {
                     let res = op(a, b);
                     self.get_stack().push(Value::Bool(res));
                 } else {
@@ -1593,8 +1624,8 @@ impl Vm {
                 }
                 self.pc_add();
             }
-            Value::String(s1) => {
-                if let Value::String(s2) = opr2 {
+            ValueKind::String(s1) => {
+                if let ValueKind::String(s2) = opr2.kind() {
                     let res = op_str(s1.get_inner(), s2.get_inner());
                     self.get_stack().push(Value::Bool(res));
                 } else {
@@ -1604,7 +1635,7 @@ impl Vm {
                 }
                 self.pc_add();
             }
-            Value::Instance(p_instance) => {
+            ValueKind::Instance(p_instance) => {
                 // a op b => a.__op__(b)
                 let instance = unsafe { &mut *p_instance };
                 let protocol_func_name = self.string_pool.creat_istring(op_name);
@@ -1616,8 +1647,8 @@ impl Vm {
                     if let Some(method) =
                         unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                     {
-                        if let Value::Closure(method) = method {
-                            let mut binded_closure = unsafe { (**method).clone() };
+                        if let ValueKind::Closure(method) = method.kind() {
+                            let mut binded_closure = unsafe { (*method).clone() };
                             binded_closure.this_ref = Some(p_instance);
                             let mut b_binded_closure = Box::new(binded_closure);
                             let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
@@ -1655,9 +1686,9 @@ impl Vm {
         let stack = self.get_stack();
         let x = arg_cnt;
         let val = &stack[stack.len() - x - 1];
-        if let Value::Closure(p_closure) = val {
+        if let ValueKind::Closure(p_closure) = val.kind() {
             let mut packed_va_list = Vec::new();
-            let chunk = unsafe { &*((**p_closure).chunk) };
+            let chunk = unsafe { &*((*p_closure).chunk) };
             if chunk.parameter_num != x {
                 if chunk.parameter_num < x && chunk.is_va {
                     for idx in (stack.len() - x + chunk.parameter_num)..stack.len() {
@@ -1669,7 +1700,7 @@ impl Vm {
                     )));
                 }
             }
-            let mut call_frame = CallFrame::new(stack.len() - x, *p_closure, packed_va_list);
+            let mut call_frame = CallFrame::new(stack.len() - x, p_closure, packed_va_list);
             call_frame.discard_return_value = discard_return_value;
             // va_list arg should be pop
             for _ in 0..x - chunk.parameter_num {
@@ -1682,8 +1713,8 @@ impl Vm {
                 (*self.executing_fiber).call_frames.push(call_frame);
             }
             return Ok(());
-        } else if let Value::NativeFunction(f) = val {
-            let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(*f) };
+        } else if let ValueKind::NativeFunction(f) = val.kind() {
+            let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
             //println!("{:?}", native::sloth_print as *mut u8);
             f(self, x, false);
             if self.fiber_changed {
@@ -1729,7 +1760,7 @@ impl Vm {
             let v = self.get_stack().pop().unwrap();
             let k_wrap = self.get_stack().pop().unwrap();
             let k;
-            if let Value::String(s) = k_wrap {
+            if let ValueKind::String(s) = k_wrap.kind() {
                 k = s;
             } else {
                 panic!("dict key is supposed to be String, maybe wrong bytecodes emitted");
@@ -1753,12 +1784,12 @@ impl Vm {
     #[inline]
     fn stack_get_number(&mut self) -> Result<(f64, f64), EvalError> {
         let (opr1, opr2);
-        if let Value::Number(x) = self.get_stack().pop().unwrap_or(Value::Nil) {
+        if let ValueKind::Number(x) = self.get_stack().pop().unwrap_or(Value::Nil).kind() {
             opr2 = x;
         } else {
             return Err(EvalError::TypeError(self.eval_err_str("")));
         }
-        if let Value::Number(x) = self.get_stack().pop().unwrap_or(Value::Nil) {
+        if let ValueKind::Number(x) = self.get_stack().pop().unwrap_or(Value::Nil).kind() {
             opr1 = x;
         } else {
             return Err(EvalError::TypeError(self.eval_err_str("")));
@@ -1768,12 +1799,12 @@ impl Vm {
     #[inline]
     fn stack_get_bool(&mut self) -> Result<(bool, bool), EvalError> {
         let (opr1, opr2);
-        if let Value::Bool(x) = self.get_stack().pop().unwrap_or(Value::Nil) {
+        if let ValueKind::Bool(x) = self.get_stack().pop().unwrap_or(Value::Nil).kind() {
             opr2 = x;
         } else {
             return Err(EvalError::TypeError(self.eval_err_str("")));
         }
-        if let Value::Bool(x) = self.get_stack().pop().unwrap_or(Value::Nil) {
+        if let ValueKind::Bool(x) = self.get_stack().pop().unwrap_or(Value::Nil).kind() {
             opr1 = x;
         } else {
             return Err(EvalError::TypeError(self.eval_err_str("")));
@@ -1782,7 +1813,7 @@ impl Vm {
     }
     #[inline]
     fn stack_get_number1(&mut self) -> Result<f64, EvalError> {
-        if let Value::Number(x) = self.get_stack().pop().unwrap_or(Value::Nil) {
+        if let ValueKind::Number(x) = self.get_stack().pop().unwrap_or(Value::Nil).kind() {
             Ok(x)
         } else {
             Err(EvalError::TypeError(self.eval_err_str("")))
@@ -1976,7 +2007,7 @@ impl Vm {
 
     // stack utils
     pub fn gets_number(&mut self) -> f64 {
-        if let Value::Number(v) = self.get_stack().pop().unwrap() {
+        if let ValueKind::Number(v) = self.get_stack().pop().unwrap().kind() {
             v
         } else {
             panic!("not a Number");
@@ -1984,7 +2015,7 @@ impl Vm {
     }
 
     pub fn gets_string(&mut self) -> IString {
-        if let Value::String(v) = self.get_stack().pop().unwrap() {
+        if let ValueKind::String(v) = self.get_stack().pop().unwrap().kind() {
             v.clone()
         } else {
             panic!("not a Number");
@@ -1992,7 +2023,7 @@ impl Vm {
     }
 
     pub fn gets_opaque(&mut self) -> *mut u8 {
-        if let Value::OpaqueData(v) = self.get_stack().pop().unwrap() {
+        if let ValueKind::OpaqueData(v) = self.get_stack().pop().unwrap().kind() {
             v
         } else {
             panic!("not an OpaqueData");

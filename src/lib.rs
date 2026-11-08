@@ -1,9 +1,11 @@
+mod bytecode;
 mod compiler;
 mod extension_methods;
 mod fiber;
 #[allow(dead_code)]
 mod interned_string;
 mod native;
+mod value;
 mod vec;
 mod draw;
 mod math;
@@ -17,6 +19,8 @@ use std::io::Write;
 use compiler::parser::{self, ParserCtx};
 use compiler::scanner::{self, ScannerCtx};
 use interned_string::{IString, StringPool};
+pub use bytecode::{Instr, OpCode};
+pub use value::{Value, ValueKind};
 use native::{
     sloth_add_glob, sloth_chr, sloth_input, sloth_load_module, sloth_ord, sloth_print_val,
     sloth_to_bool, sloth_to_number, sloth_to_string, sloth_typeof, sloth_va_arg,
@@ -136,44 +140,6 @@ pub fn run_string_debug(prog: &str, only_compile: bool, debug: bool) -> Result<(
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Value {
-    Nil,
-    Bool(bool),
-    Number(f64),
-    Range(f64, f64),
-    String(IString),
-    //Symbol(IString),
-    Array(*mut Array),
-    Dictionary(*mut Dict),
-    Error(*mut Dict),
-    Module(*mut Dict),
-    Closure(*mut Closure),
-    NativeFunction(*mut u8), //void*
-    /// NativeFunctions may use it
-    OpaqueData(*mut u8),
-    Fiber(*mut Fiber),
-
-    Klass(*mut Klass),
-    Instance(*mut Instance),
-
-    StringIter(IString, usize),
-    ArrayIter(*mut Array, usize),
-}
-
-impl Value {
-    pub fn to_bool_v(&self) -> Value {
-        Value::Bool(self.to_bool())
-    }
-    pub fn to_bool(&self) -> bool {
-        match self {
-            Value::Nil => false,
-            Value::Bool(v) => *v,
-            _ => true,
-        }
-    }
-}
-
 trait GCObject {
     fn is_marked(&self) -> bool;
     fn mark(&mut self);
@@ -204,16 +170,16 @@ macro_rules! derive_gcobject {
 /// Mark a value and, if it is heap allocated, everything reachable from it.
 #[inline]
 fn mark_value(val: &Value) {
-    match val {
-        Value::Array(p_arr) => unsafe { mark_gc_object(&mut **p_arr) },
-        Value::Dictionary(p_dict) | Value::Error(p_dict) | Value::Module(p_dict) => unsafe {
-            mark_gc_object(&mut **p_dict)
+    match val.kind() {
+        ValueKind::Array(p_arr) => unsafe { mark_gc_object(&mut *p_arr) },
+        ValueKind::Dictionary(p_dict) | ValueKind::Error(p_dict) | ValueKind::Module(p_dict) => unsafe {
+            mark_gc_object(&mut *p_dict)
         },
-        Value::Closure(p_closure) => unsafe { mark_gc_object(&mut **p_closure) },
-        Value::Fiber(p_fiber) => unsafe { mark_gc_object(&mut **p_fiber) },
-        Value::Klass(p_klass) => unsafe { mark_gc_object(&mut **p_klass) },
-        Value::Instance(p_instance) => unsafe { mark_gc_object(&mut **p_instance) },
-        Value::ArrayIter(p_arr, _) => unsafe { mark_gc_object(&mut **p_arr) },
+        ValueKind::Closure(p_closure) => unsafe { mark_gc_object(&mut *p_closure) },
+        ValueKind::Fiber(p_fiber) => unsafe { mark_gc_object(&mut *p_fiber) },
+        ValueKind::Klass(p_klass) => unsafe { mark_gc_object(&mut *p_klass) },
+        ValueKind::Instance(p_instance) => unsafe { mark_gc_object(&mut *p_instance) },
+        ValueKind::ArrayIter(p_arr, _) => unsafe { mark_gc_object(&mut *p_arr) },
         _ => {}
     }
 }
@@ -400,7 +366,9 @@ pub struct Matrix {
 }
 #[derive(Default, Clone)]
 pub struct Chunk {
-    pub bytecodes: Vec<Instr>,
+    /// Variable-length bytecode stream.  See [`bytecode`] for the encoding.
+    pub bytecodes: Vec<u8>,
+    /// Source line of every byte in `bytecodes`.
     pub lines: Vec<usize>,
     pub constants: Vec<Value>,
     pub chunks: Vec<Chunk>,
@@ -410,6 +378,12 @@ pub struct Chunk {
     pub num_locals: usize,
     pub is_va: bool,
 }
+impl Chunk {
+    /// Decode the instruction starting at byte offset `pc`.
+    pub fn decode(&self, pc: usize) -> Result<(Instr, usize), u8> {
+        bytecode::decode_instr(&self.bytecodes, pc)
+    }
+}
 impl PartialEq for Chunk {
     fn eq(&self, _other: &Self) -> bool {
         false //it is never necessary to compare two Chunk
@@ -418,8 +392,19 @@ impl PartialEq for Chunk {
 impl Debug for Chunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)?;
-        for i in 0..(self.bytecodes.len()) {
-            writeln!(f, "{:>15}   {:?}", self.lines[i], self.bytecodes[i])?;
+        let mut pc = 0;
+        while pc < self.bytecodes.len() {
+            match self.decode(pc) {
+                Ok((instr, len)) => {
+                    let line = self.lines.get(pc).copied().unwrap_or(0);
+                    writeln!(f, "{:>15}   {:?}   @{pc}", line, instr)?;
+                    pc += len;
+                }
+                Err(op) => {
+                    writeln!(f, "{:>15}   <unknown opcode {op:#04x}>   @{pc}", 0)?;
+                    break;
+                }
+            }
         }
         writeln!(f, "num_locals: {:?}", self.num_locals)?;
         writeln!(f, "constants: {:?}", self.constants)?;
@@ -441,75 +426,6 @@ impl PartialEq for Closure {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
     }
-}
-#[derive(Clone, Copy, Debug)]
-pub enum Instr {
-    Nop,
-
-    Load(usize),
-    LoadChunk(usize),
-    GetGlobal(usize),
-    SetGlobal(usize),
-    GetLocal(usize),
-    SetLocal(usize),
-    GetUpValue(usize),
-    SetUpValue(usize),
-    InitArray(usize), /*size of array*/
-    InitDict(usize),
-    PushNil,
-    /// . / [] have different semmantic on Instance of Classes
-    /// due to the involvment of operator overriding.
-    /// 0 - []
-    /// 1 - .
-    GetCollection(usize),
-    SetCollection(usize),
-
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    Negate,
-
-    Not,
-    And,
-    Or,
-
-    Gt,
-    Lt,
-    Ge,
-    Le,
-    Eq,
-    Ne,
-    LoadTrue,
-    LoadFalse,
-
-    ClassIs,
-
-    Pop,
-    Swap2,       /*change top 2 value on the stack*/
-    Call(usize), /*parameter num*/
-
-    TryCall(usize),
-    JumpIfNot(i32),
-    JumpIfTrue(i32),
-    Jump(i32),
-    Return,
-    Except,
-
-    MakeRange,
-    MakeRangeClosed,
-
-    Iterator,
-    Next,
-
-    InitClass,
-    AddMethod,
-    ClassExtend,
-    GetSuperMethod,
-    GetThis,
-
-    UnpackVA,
 }
 type NativeFunction = fn(&mut Vm, usize, bool);
 #[cfg(test)]

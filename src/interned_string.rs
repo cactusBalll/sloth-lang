@@ -47,6 +47,40 @@ impl IString {
     pub fn get_inner(&self) -> &str {
         unsafe { &(*self.data).data }
     }
+
+    /// Raw pointer to the pooled string.  Used by the NaN-boxed value
+    /// representation to store a string in a 48 bit payload.
+    pub fn as_raw(&self) -> *mut u8 {
+        self.data as *mut u8
+    }
+
+    /// Take ownership of a raw pointer previously returned by `as_raw`.
+    ///
+    /// # Safety
+    /// `raw` must be a live string pool pointer and the caller transfers one
+    /// reference to the returned `IString`.
+    pub unsafe fn from_raw(raw: *mut u8) -> IString {
+        IString {
+            data: raw as *mut StringPoolEntry,
+        }
+    }
+
+    /// Increment the reference count without creating an `IString`.
+    ///
+    /// # Safety
+    /// `raw` must point to a live string pool entry.
+    pub unsafe fn retain_raw(raw: *mut u8) {
+        (*(raw as *mut StringPoolEntry)).ref_count += 1;
+    }
+
+    /// Release one reference without creating an `IString`.
+    ///
+    /// # Safety
+    /// `raw` must point to a live string pool entry that is referenced at
+    /// least once.
+    pub unsafe fn release_raw(raw: *mut u8) {
+        (*(raw as *mut StringPoolEntry)).ref_count -= 1;
+    }
 }
 struct StringPoolEntry {
     data: String,

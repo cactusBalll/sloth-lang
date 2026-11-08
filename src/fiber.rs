@@ -2,7 +2,7 @@ use std::ptr::null_mut;
 
 use crate::{
     vm::{CallFrame, Vm},
-    Fiber, FiberState, Value,
+    Fiber, FiberState, Value, ValueKind,
 };
 
 macro_rules! arity_assert {
@@ -25,7 +25,7 @@ pub fn sloth_fiber_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
     args.reverse();
     let closure = vm.get_stack().pop().unwrap();
     let _ = vm.get_stack().pop();
-    let p_closure = if let Value::Closure(p_closure) = closure {
+    let p_closure = if let ValueKind::Closure(p_closure) = closure.kind() {
         p_closure
     } else {
         panic!("creating Fiber with something not callable.");
@@ -82,7 +82,7 @@ pub fn sloth_fiber_resume(vm: &mut Vm, arg_num: usize, _protected: bool) {
     } else {
         Value::Nil
     };
-    let fiber = if let Value::Fiber(f) = vm.get_stack().pop().unwrap() {
+    let fiber = if let ValueKind::Fiber(f) = vm.get_stack().pop().unwrap().kind() {
         f
     } else {
         panic!("can only resume Fiber");
@@ -126,7 +126,7 @@ pub fn sloth_fiber_yield(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn sloth_fiber_transfer(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(0, arg_num);
-    let fiber = if let Value::Fiber(f) = vm.get_stack().pop().unwrap() {
+    let fiber = if let ValueKind::Fiber(f) = vm.get_stack().pop().unwrap().kind() {
         f
     } else {
         panic!("can only resume Fiber");
@@ -156,7 +156,7 @@ pub fn sloth_fiber_set_error(vm: &mut Vm, arg_num: usize, _protected: bool) {
             eprintln!("stack: {:?}", vm.get_stack());
             eprintln!("call_frame: {:?}", vm.get_call_frame());
             let pc = vm.get_call_frame().pc;
-            let instr = (&*(&mut *vm.get_call_frame().closure).chunk).bytecodes[pc];
+            let instr = (&*(&mut *vm.get_call_frame().closure).chunk).decode(pc);
             eprintln!("instr: {:?}", instr);
             panic!("fiber error occured but nowhere to go.");
         }
@@ -168,7 +168,7 @@ pub fn sloth_fiber_set_error(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn sloth_fiber_check(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let fiber = if let Value::Fiber(f) = vm.get_stack().pop().unwrap() {
+    let fiber = if let ValueKind::Fiber(f) = vm.get_stack().pop().unwrap().kind() {
         f
     } else {
         panic!("not a Fiber");
@@ -182,7 +182,7 @@ pub fn sloth_fiber_check(vm: &mut Vm, arg_num: usize, _protected: bool) {
 
 pub fn sloth_fiber_resumable(vm: &mut Vm, arg_num: usize, _protected: bool) {
     arity_assert!(1, arg_num);
-    let fiber = if let Value::Fiber(f) = vm.get_stack().pop().unwrap() {
+    let fiber = if let ValueKind::Fiber(f) = vm.get_stack().pop().unwrap().kind() {
         f
     } else {
         panic!("not a Fiber");

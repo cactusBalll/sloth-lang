@@ -1,4 +1,4 @@
-use crate::{vm::Vm, Value};
+use crate::{vm::Vm, Value, ValueKind};
 
 macro_rules! arity_assert {
     ($n:expr, $arg_num:expr) => {
@@ -21,7 +21,7 @@ pub fn array_push(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // Array is hided under me
     let clct = vm.get_stack().pop().unwrap();
 
-    if let Value::Array(p_arr) = clct {
+    if let ValueKind::Array(p_arr) = clct.kind() {
         unsafe {
             (*p_arr).array.push(v);
         }
@@ -38,7 +38,7 @@ pub fn array_pop(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // Array is hided under me
     let clct = vm.get_stack().pop().unwrap();
 
-    if let Value::Array(p_arr) = clct {
+    if let ValueKind::Array(p_arr) = clct.kind() {
         unsafe {
             let v = (*p_arr).array.pop().unwrap();
             vm.get_stack().push(v);
@@ -54,7 +54,7 @@ pub fn array_pop_front(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // Array is hided under me
     let clct = vm.get_stack().pop().unwrap();
 
-    if let Value::Array(p_arr) = clct {
+    if let ValueKind::Array(p_arr) = clct.kind() {
         unsafe {
             let v = (*p_arr).array.remove(0);
             vm.get_stack().push(v);
@@ -71,7 +71,7 @@ pub fn array_remove(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // Array is hided under me
     let clct = vm.get_stack().pop().unwrap();
 
-    if let Value::Array(p_arr) = clct {
+    if let ValueKind::Array(p_arr) = clct.kind() {
         unsafe {
             let v = (*p_arr).array.remove(idx as usize);
             vm.get_stack().push(v);
@@ -89,7 +89,7 @@ pub fn array_insert(vm: &mut Vm, arg_num: usize, _protected: bool) {
     // Array is hided under me
     let clct = vm.get_stack().pop().unwrap();
 
-    if let Value::Array(p_arr) = clct {
+    if let ValueKind::Array(p_arr) = clct.kind() {
         unsafe {
             (*p_arr).array.insert(idx as usize, v);
         }

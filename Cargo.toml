@@ -7,6 +7,12 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[features]
+default = ["nan-boxing"]
+# Store values in a single NaN-boxed 64 bit word instead of the default
+# tagged-union enum.
+nan-boxing = []
+
 [dependencies]
 clap = { version = "4.5.20", features = ["derive"] }
 raylib = "5.0.2"
