@@ -2,8 +2,9 @@
 
 出于学习目的编写的基于字节码的解释器。
 sloth definitely runs slower than python ()
-
-BUAA ADSL2024 课程设计
+1. 2022起，个人解释器项目
+2. 2024, BUAA ADSL2024 课程设计
+3. 2026, AOT支持等优化
 
 ## 字节码格式
 
@@ -81,3 +82,22 @@ cargo run -- build sloth/sloth_examples/hello.slt --emit obj -o hello.o
 - 静态 `import("literal")` 会在编译期递归预编译；动态 import 路径不支持。
 - AOT runtime 不链接 raylib，`draw` 模块不可用；解释器模式仍支持。
 - 首版以 host target 为主；交叉目标需要自备对应 `llc` 和链接器。
+
+## 性能基准
+
+`benches/programs/` 下有 6 个典型 sloth 程序（递归、数值循环、数组筛法、
+对象方法、字典查找、字符串处理），每个程序都有对应的 CPython 版本。
+`benches/compare.py` 会分别测量 switch 解释器、AOT 模板后端和 CPython 的
+墙钟时间；`cargo bench --bench interpreter_bench` 使用 criterion 0.8.2
+对 switch 解释器做进程内基准。
+
+```bash
+python3 benches/compare.py --python python3.12
+cargo bench --bench interpreter_bench
+```
+
+当前结果、性能缺口分析和优化建议见 [BENCHMARKS.md](BENCHMARKS.md)。
+
+> 注意：AOT 对比务必链接 release 版 `libsloth_runtime.a`。当前
+> `find_runtime_lib` 会优先选择 debug 版；误链 debug runtime 会让 AOT
+> 程序慢一个数量级以上。

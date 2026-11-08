@@ -25,8 +25,8 @@ members = ["runtime"]
 resolver = "2"
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.8.2"
 
 [[bench]]
-name = "fib_bench"
+name = "interpreter_bench"
 harness = false

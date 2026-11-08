@@ -1,0 +1,15 @@
+// String concatenation and per-character iteration.
+var parts = "abcdefghij";
+var s = "";
+var i = 0;
+while (i < 10000) {
+    s = s + parts;
+    i = i + 1;
+}
+var count = 0;
+for (var ch: s) {
+    if (ch == "a") {
+        count = count + 1;
+    }
+}
+print(count);

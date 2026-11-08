@@ -1,0 +1,23 @@
+// Class instantiation, field access, method calls and returns.
+class Counter {
+    func __init__(start) {
+        this.value = start;
+    }
+    func add(x) {
+        this.value = this.value + x;
+        return this.value;
+    }
+    func norm() {
+        return this.value * 2;
+    }
+}
+
+var c = Counter(0);
+var i = 0;
+var acc = 0;
+while (i < 300000) {
+    c.add(i);
+    acc = acc + c.norm();
+    i = i + 1;
+}
+print(c.value, acc);

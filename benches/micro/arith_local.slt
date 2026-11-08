@@ -1,0 +1,11 @@
+// Local-variable arithmetic loop, used to isolate global-variable overhead.
+func run() {
+    var i = 0;
+    var acc = 0;
+    while (i < 2000000) {
+        acc = acc + (i * 3) % 7 - 1;
+        i = i + 1;
+    }
+    return acc;
+}
+print(run());

@@ -1,0 +1,8 @@
+// Tight while loop with arithmetic, comparison and modulo.
+var i = 0;
+var acc = 0;
+while (i < 2000000) {
+    acc = acc + (i * 3) % 7 - 1;
+    i = i + 1;
+}
+print(acc);
