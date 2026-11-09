@@ -77,6 +77,7 @@ pub enum OpCode {
     GetThis = 49,
 
     UnpackVA = 50,
+    GetProperty = 51,
 }
 
 impl OpCode {
@@ -141,6 +142,7 @@ impl OpCode {
             49 => GetThis,
 
             50 => UnpackVA,
+            51 => GetProperty,
             _ => return None,
         })
     }
@@ -163,11 +165,13 @@ pub enum Instr {
     InitArray(usize), /*size of array*/
     InitDict(usize),
     PushNil,
-    /// . / [] have different semmantic on Instance of Classes
-    /// due to the involvment of operator overriding.
+    /// `collection[index]`
+    GetCollection,
+    /// `collection.property`
+    GetProperty,
+    /// `collection[index] = value` / `collection.property = value`
     /// 0 - []
     /// 1 - .
-    GetCollection(usize),
     SetCollection(usize),
 
     Add,
@@ -276,7 +280,7 @@ fn instr_len(instr: &Instr) -> usize {
         Nop | PushNil | Add | Sub | Mul | Div | Mod | Negate | Not | And | Or | Gt | Lt | Ge
         | Le | Eq | Ne | LoadTrue | LoadFalse | ClassIs | Pop | Swap2 | Return
         | MakeRange | MakeRangeClosed | Iterator | Next | InitClass | AddMethod | ClassExtend
-        | GetSuperMethod | GetThis | UnpackVA => 1,
+        | GetSuperMethod | GetThis | UnpackVA | GetCollection | GetProperty => 1,
         JumpIfNot(_) | JumpIfTrue(_) | Jump(_) => 1 + JUMP_OPERAND_SIZE,
         Load(x)
         | LoadChunk(x)
@@ -288,7 +292,6 @@ fn instr_len(instr: &Instr) -> usize {
         | SetUpValue(x)
         | InitArray(x)
         | InitDict(x)
-        | GetCollection(x)
         | SetCollection(x)
         | Call(x) => 1 + leb128_len(*x as u64),
     }
@@ -374,10 +377,8 @@ fn encode_one(instr: &Instr, index: usize, offsets: &[usize], out: &mut Vec<u8>)
             write_u64(out, *x as u64);
         }
         PushNil => op(out, OpCode::PushNil),
-        GetCollection(x) => {
-            op(out, OpCode::GetCollection);
-            write_u64(out, *x as u64);
-        }
+        GetCollection => op(out, OpCode::GetCollection),
+        GetProperty => op(out, OpCode::GetProperty),
         SetCollection(x) => {
             op(out, OpCode::SetCollection);
             write_u64(out, *x as u64);
@@ -467,7 +468,8 @@ pub fn decode_instr(code: &[u8], pc: usize) -> Result<(Instr, usize), u8> {
         OpCode::InitArray => InitArray(read_operand(code, operand_pc, pc)?),
         OpCode::InitDict => InitDict(read_operand(code, operand_pc, pc)?),
         OpCode::PushNil => PushNil,
-        OpCode::GetCollection => GetCollection(read_operand(code, operand_pc, pc)?),
+        OpCode::GetCollection => GetCollection,
+        OpCode::GetProperty => GetProperty,
         OpCode::SetCollection => SetCollection(read_operand(code, operand_pc, pc)?),
         OpCode::Add => Add,
         OpCode::Sub => Sub,
@@ -558,7 +560,9 @@ fn instruction_len(code: &[u8], pc: usize, instr: &Instr) -> Result<usize, u8> {
         | OpCode::ClassExtend
         | OpCode::GetSuperMethod
         | OpCode::GetThis
-        | OpCode::UnpackVA => 1,
+        | OpCode::UnpackVA
+        | OpCode::GetCollection
+        | OpCode::GetProperty => 1,
         OpCode::JumpIfNot | OpCode::JumpIfTrue | OpCode::Jump => {
             1 + JUMP_OPERAND_SIZE
         }

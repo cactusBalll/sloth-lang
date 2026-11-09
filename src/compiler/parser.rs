@@ -742,7 +742,7 @@ impl<'a> ParserCtx<'a> {
                     self.advance();
                     self.parse_rval_expr(PrattPrecedence::Lowest)?;
                     self.consume(Token::RBracket)?;
-                    self.emit_with_line(Instr::GetCollection(0), line);
+                    self.emit_with_line(Instr::GetCollection, line);
                     continue;
                 } else if tk == Token::Dot {
                     let line = self.get_line();
@@ -753,7 +753,7 @@ impl<'a> ParserCtx<'a> {
                     } else {
                         return Err(self.parser_err_str("invalid rval expr"));
                     }
-                    self.emit_with_line(Instr::GetCollection(1), line);
+                    self.emit_with_line(Instr::GetProperty, line);
                     continue;
                 } else {
                     is_assign = false;
@@ -768,10 +768,11 @@ impl<'a> ParserCtx<'a> {
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 // now value is on the top of stack
                 let modified_instr = match last_instr {
-                    Instr::GetCollection(v) => {
+                    Instr::GetCollection => {
                         // idx already on stack[top-1]
-                        Instr::SetCollection(v)
+                        Instr::SetCollection(0)
                     }
+                    Instr::GetProperty => Instr::SetCollection(1),
                     Instr::GetLocal(x) => Instr::SetLocal(x),
                     Instr::GetGlobal(x) => Instr::SetGlobal(x),
                     Instr::GetUpValue(x) => Instr::SetUpValue(x),
@@ -952,7 +953,7 @@ impl<'a> ParserCtx<'a> {
                 self.advance();
                 self.parse_rval_expr(PrattPrecedence::Lowest)?;
                 self.consume(Token::RBracket)?;
-                self.emit_with_line(Instr::GetCollection(0), line);
+                self.emit_with_line(Instr::GetCollection, line);
                 continue;
             }
             if tk == Token::Dot {
@@ -964,7 +965,7 @@ impl<'a> ParserCtx<'a> {
                 } else {
                     return Err(self.parser_err_str("invalid rval expr"));
                 }
-                self.emit_with_line(Instr::GetCollection(1), line);
+                self.emit_with_line(Instr::GetProperty, line);
                 continue;
             }
             let backpatch_point: usize = self.instrs[self.depth].len();

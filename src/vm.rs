@@ -928,152 +928,11 @@ impl Vm {
                 stack.push(Value::Dictionary(p_dict));
                 self.pc_add();
             }
-            Instr::GetCollection(va) => {
-                let idx = stack.pop().unwrap();
-                let clct = stack.pop().unwrap();
-                match clct.kind() {
-                    ValueKind::Array(p_array) => {
-                        if va == 0 {
-                            if let ValueKind::Number(i) = idx.kind() {
-                                if i < 0. {
-                                    return Err(EvalError::IndexOutOfBound(self.eval_err_str(
-                                        "Array cannot be indexed by negative value",
-                                    )));
-                                }
-                                let i = i as usize;
-                                let arr = unsafe { &mut *p_array };
-                                if i >= arr.array.len() {
-                                    return Err(EvalError::IndexOutOfBound(
-                                        self.eval_err_str("index >= length of array"),
-                                    ));
-                                } else {
-                                    let elem = arr.array.get(i).unwrap().clone();
-                                    stack.push(elem);
-                                    self.pc_add();
-                                }
-                            } else {
-                                return Err(EvalError::TypeError(
-                                    self.eval_err_str("Array can only be indexed by Number"),
-                                ));
-                            }
-                        } else if va == 1 {
-                            // `methods` on Array
-                            stack.push(clct);
-                            if let ValueKind::String(s) = idx.kind() {
-                                let ext_name = self
-                                    .get_builtin_type_extension_name("Array", s.get_inner());
-                                let ext_method = self.global.last().unwrap()[&ext_name].clone();
-                                stack.push(ext_method);
-                                self.pc_add();
-                            } else {
-                                return Err(EvalError::TypeError(self.eval_err_str(
-                                    "Array. syntax is used to call extension methods on it.",
-                                )));
-                            }
-                        }
-                    }
-                    ValueKind::Dictionary(p_dict) => {
-                        if let ValueKind::String(s) = idx.kind() {
-                            let m = unsafe { &mut *p_dict };
-                            if let Some(v) = m.dict.get(&s) {
-                                stack.push(v.clone());
-                                self.pc_add();
-                            } else {
-                                return Err(EvalError::KeyError(
-                                    self.eval_err_str("unknown key to module"),
-                                ));
-                            }
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("Dict can only be indexed by String"),
-                            ));
-                        }
-                    }
-                    ValueKind::Instance(p_instance) => {
-                        if va == 0 {
-                            let protocol_name = self.string_pool.creat_istring("__index__");
-                            if let Some(method) =
-                                unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
-                            {
-                                if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
-                                    stack.push(idx);
-                                    self.call_routine(1)?;
-                                } else {
-                                    unreachable!()
-                                }
-                            } else {
-                                return Err(EvalError::VariableNotFound(
-                                    self.eval_err_str("`__index__` method not found"),
-                                ));
-                            }
-                        } else {
-                            if let ValueKind::String(i) = idx.kind() {
-                                let instance = unsafe { &mut *p_instance };
-                                if let Some(v) = instance.fields.get(&i) {
-                                    stack.push(v.clone());
-                                    self.pc_add();
-                                } else {
-                                    if let Some(method) =
-                                        unsafe { (*instance.klass).methods.get(&i) }
-                                    {
-                                        if let ValueKind::Closure(method) = method.kind() {
-                                            let mut binded_closure =
-                                                unsafe { (*method).clone() };
-                                            binded_closure.this_ref = Some(p_instance);
-                                            let mut b_binded_closure = Box::new(binded_closure);
-                                            let p_binded_closure =
-                                                b_binded_closure.as_mut() as *mut Closure;
-                                            self.objects.push(b_binded_closure);
-                                            let v = Value::Closure(p_binded_closure);
-                                            stack.push(v);
-                                            self.pc_add();
-                                        } else {
-                                            unreachable!()
-                                        }
-                                    } else {
-                                        return Err(EvalError::VariableNotFound(
-                                            self.eval_err_str("method not found"),
-                                        ));
-                                    }
-                                }
-                            } else {
-                                return Err(EvalError::TypeError(
-                                    self.eval_err_str("Instance can only be indexed by String"),
-                                ));
-                            }
-                        }
-                    }
-                    ValueKind::Module(p_module) => {
-                        if let ValueKind::String(s) = idx.kind() {
-                            let m = unsafe { &mut *p_module };
-                            if let Some(v) = m.dict.get(&s) {
-                                stack.push(v.clone());
-                                self.pc_add();
-                            } else {
-                                return Err(EvalError::KeyError(
-                                    self.eval_err_str("unknown key to module"),
-                                ));
-                            }
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("Module can only be indexed by String"),
-                            ));
-                        }
-                    }
-                    v => {
-                        return Err(EvalError::TypeError(
-                            self.eval_err_str(format!("{:?} can not be indexed", v).as_ref()),
-                        ));
-                    }
-                };
+            Instr::GetCollection => {
+                self.exec_get_collection()?;
+            }
+            Instr::GetProperty => {
+                self.exec_get_property()?;
             }
             Instr::SetCollection(va) => {
                 let val = stack.pop().unwrap();
@@ -1715,6 +1574,194 @@ impl Vm {
         }
         Ok(())
     }
+    /// `collection[index]`
+    fn exec_get_collection(&mut self) -> EvalResult {
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        let idx = stack.pop().unwrap();
+        let clct = stack.pop().unwrap();
+        match clct.kind() {
+            ValueKind::Array(p_array) => {
+                if let ValueKind::Number(i) = idx.kind() {
+                    if i < 0. {
+                        return Err(EvalError::IndexOutOfBound(self.eval_err_str(
+                            "Array cannot be indexed by negative value",
+                        )));
+                    }
+                    let i = i as usize;
+                    let arr = unsafe { &mut *p_array };
+                    if i >= arr.array.len() {
+                        return Err(EvalError::IndexOutOfBound(
+                            self.eval_err_str("index >= length of array"),
+                        ));
+                    } else {
+                        let elem = arr.array.get(i).unwrap().clone();
+                        stack.push(elem);
+                        self.pc_add();
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Array can only be indexed by Number"),
+                    ));
+                }
+            }
+            ValueKind::Dictionary(p_dict) => {
+                if let ValueKind::String(s) = idx.kind() {
+                    let m = unsafe { &mut *p_dict };
+                    if let Some(v) = m.dict.get(&s) {
+                        stack.push(v.clone());
+                        self.pc_add();
+                    } else {
+                        return Err(EvalError::KeyError(
+                            self.eval_err_str("unknown key to module"),
+                        ));
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Dict can only be indexed by String"),
+                    ));
+                }
+            }
+            ValueKind::Instance(p_instance) => {
+                let protocol_name = self.string_pool.creat_istring("__index__");
+                if let Some(method) = unsafe { (*(*p_instance).klass).methods.get(&protocol_name) } {
+                    if let ValueKind::Closure(method) = method.kind() {
+                        let mut binded_closure = unsafe { (*method).clone() };
+                        binded_closure.this_ref = Some(p_instance);
+                        let mut b_binded_closure = Box::new(binded_closure);
+                        let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
+                        self.objects.push(b_binded_closure);
+                        let f = Value::Closure(p_binded_closure);
+                        stack.push(f);
+                        stack.push(idx);
+                        self.call_routine(1)?;
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    return Err(EvalError::VariableNotFound(
+                        self.eval_err_str("`__index__` method not found"),
+                    ));
+                }
+            }
+            ValueKind::Module(p_module) => {
+                if let ValueKind::String(s) = idx.kind() {
+                    let m = unsafe { &mut *p_module };
+                    if let Some(v) = m.dict.get(&s) {
+                        stack.push(v.clone());
+                        self.pc_add();
+                    } else {
+                        return Err(EvalError::KeyError(
+                            self.eval_err_str("unknown key to module"),
+                        ));
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Module can only be indexed by String"),
+                    ));
+                }
+            }
+            v => {
+                return Err(EvalError::TypeError(
+                    self.eval_err_str(format!("{:?} can not be indexed", v).as_ref()),
+                ));
+            }
+        };
+        Ok(())
+    }
+
+    /// `collection.property`
+    fn exec_get_property(&mut self) -> EvalResult {
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        let idx = stack.pop().unwrap();
+        let clct = stack.pop().unwrap();
+        match clct.kind() {
+            ValueKind::Array(_) => {
+                // `methods` on Array
+                stack.push(clct);
+                if let ValueKind::String(s) = idx.kind() {
+                    let ext_name = self.get_builtin_type_extension_name("Array", s.get_inner());
+                    let ext_method = self.global.last().unwrap()[&ext_name].clone();
+                    stack.push(ext_method);
+                    self.pc_add();
+                } else {
+                    return Err(EvalError::TypeError(self.eval_err_str(
+                        "Array. syntax is used to call extension methods on it.",
+                    )));
+                }
+            }
+            ValueKind::Dictionary(p_dict) => {
+                if let ValueKind::String(s) = idx.kind() {
+                    let m = unsafe { &mut *p_dict };
+                    if let Some(v) = m.dict.get(&s) {
+                        stack.push(v.clone());
+                        self.pc_add();
+                    } else {
+                        return Err(EvalError::KeyError(
+                            self.eval_err_str("unknown key to module"),
+                        ));
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Dict can only be indexed by String"),
+                    ));
+                }
+            }
+            ValueKind::Instance(p_instance) => {
+                if let ValueKind::String(i) = idx.kind() {
+                    let instance = unsafe { &mut *p_instance };
+                    if let Some(v) = instance.fields.get(&i) {
+                        stack.push(v.clone());
+                        self.pc_add();
+                    } else if let Some(method) = unsafe { (*instance.klass).methods.get(&i) } {
+                        if let ValueKind::Closure(method) = method.kind() {
+                            let mut binded_closure = unsafe { (*method).clone() };
+                            binded_closure.this_ref = Some(p_instance);
+                            let mut b_binded_closure = Box::new(binded_closure);
+                            let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
+                            self.objects.push(b_binded_closure);
+                            let v = Value::Closure(p_binded_closure);
+                            stack.push(v);
+                            self.pc_add();
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        return Err(EvalError::VariableNotFound(
+                            self.eval_err_str("method not found"),
+                        ));
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Instance can only be indexed by String"),
+                    ));
+                }
+            }
+            ValueKind::Module(p_module) => {
+                if let ValueKind::String(s) = idx.kind() {
+                    let m = unsafe { &mut *p_module };
+                    if let Some(v) = m.dict.get(&s) {
+                        stack.push(v.clone());
+                        self.pc_add();
+                    } else {
+                        return Err(EvalError::KeyError(
+                            self.eval_err_str("unknown key to module"),
+                        ));
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Module can only be indexed by String"),
+                    ));
+                }
+            }
+            v => {
+                return Err(EvalError::TypeError(
+                    self.eval_err_str(format!("{:?} can not be indexed", v).as_ref()),
+                ));
+            }
+        };
+        Ok(())
+    }
+
     fn call_routine(&mut self, arg_cnt: usize) -> Result<(), EvalError> {
         self.call_routine2(arg_cnt, false)
     }
