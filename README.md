@@ -44,8 +44,12 @@ cargo test --no-default-features    # tagged-union
 
 - 每个 `Chunk` 对应一个 native 函数；
 - 每条字节码对应一个基本块/模板；
-- 数值运算、比较、常量、局部变量、跳转等热路径直接内联为 LLVM IR；
-- 字符串池、数组/字典、类、GC、native 调用、CallFrame/fiber 切换走小型 runtime ABI；
+- 数值运算、比较、常量、局部变量、跳转、真值判断等热路径直接内联为 LLVM IR；
+- 生成代码直接读写 runtime 暴露的值栈（`sloth_rt_stack_data/len/cap`），
+  不再为每条 `push`/`pop`/`GetLocal` 调用 ABI；
+- `pc` 只在离开当前 chunk 或进入需要它的慢路径时同步，块内跳转直接 `br`；
+- 字符串池、数组/字典、类、GC、native 调用、CallFrame/fiber 切换走专用
+  runtime ABI；没有通用 `sloth_rt_exec` 兜底；
 - 函数调用仍使用 VM 的 `CallFrame` 和中央 dispatcher，因此 fiber/闭包语义与解释器一致。
 
 ### 构建

@@ -1,15 +1,24 @@
 //! LLVM IR generation for the AOT backend.
 //!
 //! Every chunk becomes one native function.  Each bytecode instruction becomes
-//! a basic block.  Hot operations (numeric arithmetic/comparison, local
-//! variables, constants, jumps, stack shuffles and truthiness) are expanded
-//! directly into IR; the remaining operations call the small runtime ABI.  The
-//! dispatcher in `main` selects the chunk function for the current VM frame.
+//! a basic block.  Hot operations are expanded directly into IR and manipulate
+//! the VM's value stack through a small set of exported stack globals:
+//!
+//! * `@sloth_rt_stack_data` – pointer to the current value stack buffer;
+//! * `@sloth_rt_stack_len`  – current number of values on the stack;
+//! * `@sloth_rt_frame_base` – stack index of the current frame's locals.
+//!
+//! The generated code updates the stack length itself, so no `sloth_rt_push`,
+//! `sloth_rt_pop`, `sloth_rt_peek_raw`, `sloth_rt_local_get`/`set` or
+//! `sloth_rt_set_pc` calls are needed inside a basic block.  The VM program
+//! counter is only synchronised when a frame changes or a slow-path ABI call
+//! needs it.  Every remaining instruction has a dedicated runtime entry point;
+//! there is no generic `sloth_rt_exec` fallback.
 
 use std::collections::HashSet;
 
 use crate::backend::image::ImageRoot;
-use crate::{Chunk, Instr, OpCode, Value, ValueKind};
+use crate::{Chunk, Instr, Value, ValueKind};
 
 #[derive(Debug, Clone, Default)]
 pub struct LlvmOptions {
@@ -72,26 +81,56 @@ fn emit_image(out: &mut String, image_bytes: &[u8]) {
 fn emit_declarations(out: &mut String) {
     out.push_str(
         r#"
+; Direct value-stack access shared with the generated code.
+@sloth_rt_stack_data = external global ptr
+@sloth_rt_stack_len = external global i64
+@sloth_rt_stack_cap = external global i64
+@sloth_rt_frame_base = external global i64
+
 declare ptr @sloth_rt_new(ptr, i64)
 declare void @sloth_rt_free(ptr)
 declare void @sloth_rt_report_error(ptr)
 declare i64 @sloth_rt_current_chunk(ptr)
 declare i64 @sloth_rt_pc(ptr)
 declare void @sloth_rt_set_pc(ptr, i64)
-declare i32 @sloth_rt_exec(ptr, i32, i64)
 declare i32 @sloth_rt_finished(ptr)
 declare void @sloth_rt_flush()
 declare void @sloth_rt_bad_pc(ptr)
-declare void @sloth_rt_push(ptr, i64)
-declare void @sloth_rt_push_number(ptr, i64)
-declare i64 @sloth_rt_pop(ptr)
-declare void @sloth_rt_pop_discard(ptr)
-declare i64 @sloth_rt_peek_raw(ptr, i64)
-declare i64 @sloth_rt_local_get(ptr, i64)
-declare void @sloth_rt_local_set(ptr, i64, i64)
-declare void @sloth_rt_swap2(ptr)
-declare void @sloth_rt_push_const(ptr, i64)
-declare i32 @sloth_rt_top_truthy(ptr)
+
+declare void @sloth_rt_stack_ensure(ptr, i64)
+declare void @sloth_rt_retain(i64)
+declare void @sloth_rt_release(i64)
+
+declare i64 @sloth_rt_get_const(ptr, i64)
+declare i64 @sloth_rt_get_global(ptr, i64)
+declare void @sloth_rt_set_global(ptr, i64, i64)
+declare i64 @sloth_rt_get_upvalue(ptr, i64)
+declare void @sloth_rt_set_upvalue(ptr, i64, i64)
+declare i64 @sloth_rt_get_this(ptr)
+
+declare i32 @sloth_rt_load_chunk(ptr, i64, i64)
+declare i32 @sloth_rt_unpack_va(ptr, i64)
+declare i32 @sloth_rt_init_array(ptr, i64, i64)
+declare i32 @sloth_rt_init_dict(ptr, i64, i64)
+declare i32 @sloth_rt_iterator(ptr, i64)
+declare i32 @sloth_rt_next(ptr, i64)
+declare i32 @sloth_rt_make_range(ptr, i64, i64)
+declare i32 @sloth_rt_class_is(ptr, i64)
+declare i32 @sloth_rt_init_class(ptr, i64)
+declare i32 @sloth_rt_class_extend(ptr, i64)
+declare i32 @sloth_rt_add_method(ptr, i64)
+declare i32 @sloth_rt_get_super_method(ptr, i64)
+declare i32 @sloth_rt_get_collection(ptr, i64)
+declare i32 @sloth_rt_get_property(ptr, i64)
+declare i32 @sloth_rt_invoke_property(ptr, i64, i64)
+declare i32 @sloth_rt_invoke_super(ptr, i64, i64)
+declare i32 @sloth_rt_set_collection(ptr, i64)
+declare i32 @sloth_rt_set_property(ptr, i64)
+declare i32 @sloth_rt_call(ptr, i64, i64)
+declare i32 @sloth_rt_return(ptr)
+declare i32 @sloth_rt_binary_slow(ptr, i64, i64)
+declare i32 @sloth_rt_unary_slow(ptr, i64, i64)
+
 declare double @llvm.fabs.f64(double)
 "#,
     );
@@ -178,9 +217,13 @@ fn emit_chunk(out: &mut String, chunk: &Chunk) -> Result<(), String> {
     let id = chunk.native_id;
     let decoded = decode_chunk(chunk)?;
     let offsets: HashSet<usize> = decoded.iter().map(|(offset, _, _)| *offset).collect();
+    let extra = stack_extra(&decoded);
 
     out.push_str(&format!("define i32 @sloth_chunk_{id}(ptr %vm) {{\n"));
     out.push_str(&format!("bb{id}_entry:\n"));
+    out.push_str(&format!(
+        "  call void @sloth_rt_stack_ensure(ptr %vm, i64 {extra})\n"
+    ));
     out.push_str(&format!("  %pc_{id} = call i64 @sloth_rt_pc(ptr %vm)\n"));
     if decoded.is_empty() {
         out.push_str(&format!("  br label %bb{id}_bad\n\n"));
@@ -195,8 +238,16 @@ fn emit_chunk(out: &mut String, chunk: &Chunk) -> Result<(), String> {
         ));
     }
 
-    for (offset, len, instr) in &decoded {
-        emit_instruction(out, chunk, id, *offset, *len, instr, &offsets);
+    {
+        let mut emitter = Emitter {
+            out,
+            id,
+            seq: 0,
+            extra,
+        };
+        for (offset, len, instr) in &decoded {
+            emitter.emit_instruction(chunk, *offset, *len, *instr, &offsets);
+        }
     }
 
     out.push_str(&format!("bb{id}_changed:\n  ret i32 1\n\n"));
@@ -209,337 +260,817 @@ fn emit_chunk(out: &mut String, chunk: &Chunk) -> Result<(), String> {
     Ok(())
 }
 
-fn emit_exec(out: &mut String, id: usize, offset: usize, opcode: u8, operand: i64, after: &str) {
-    out.push_str(&format!(
-        "  %r_{id}_{offset} = call i32 @sloth_rt_exec(ptr %vm, i32 {opcode}, i64 {operand})\n"
-    ));
-    out.push_str(&format!(
-        "  switch i32 %r_{id}_{offset}, label %bb{id}_err [\n    i32 0, label {after}\n    i32 1, label %bb{id}_changed\n    i32 2, label %bb{id}_finished\n  ]\n"
-    ));
+/// Conservative number of additional stack slots the inline code of a chunk
+/// may need.  Slow-path ABI calls re-establish this reserve themselves.
+fn stack_extra(decoded: &[(usize, usize, Instr)]) -> i64 {
+    let mut pushes = 0i64;
+    for (_, _, instr) in decoded {
+        pushes += match instr {
+            Instr::PushNil
+            | Instr::LoadTrue
+            | Instr::LoadFalse
+            | Instr::Load(_)
+            | Instr::GetGlobal(_)
+            | Instr::GetLocal(_)
+            | Instr::GetUpValue(_)
+            | Instr::GetThis
+            | Instr::LoadChunk(_)
+            | Instr::InitArray(_)
+            | Instr::InitDict(_) => 1,
+            Instr::Next => 2,
+            Instr::UnpackVA => 16,
+            _ => 0,
+        };
+    }
+    (pushes + 64).min(1 << 20)
 }
 
-fn emit_number_check(out: &mut String, id: usize, offset: usize, name: &str) -> String {
-    let base = format!("{name}_{id}_{offset}");
-    out.push_str(&format!("  %{base}_top = lshr i64 %{base}, 48\n"));
-    out.push_str(&format!("  %{base}_mask = and i64 %{base}_top, 65528\n"));
-    out.push_str(&format!(
-        "  %{base}_is7 = icmp eq i64 %{base}_mask, 32760\n"
-    ));
-    out.push_str(&format!(
-        "  %{base}_isf = icmp eq i64 %{base}_mask, 65528\n"
-    ));
-    out.push_str(&format!(
-        "  %{base}_tagged = or i1 %{base}_is7, %{base}_isf\n"
-    ));
-    out.push_str(&format!("  %{base}_num = xor i1 %{base}_tagged, true\n"));
-    format!("%{base}_num")
-}
-
-fn emit_binary_fast(out: &mut String, id: usize, offset: usize, fast_body: &str, push_fn: &str) {
-    let a = format!("%a_{id}_{offset}");
-    let b = format!("%b_{id}_{offset}");
-    out.push_str(&format!(
-        "  %{0} = call i64 @sloth_rt_peek_raw(ptr %vm, i64 0)\n",
-        format!("b_{id}_{offset}")
-    ));
-    out.push_str(&format!(
-        "  %{0} = call i64 @sloth_rt_peek_raw(ptr %vm, i64 1)\n",
-        format!("a_{id}_{offset}")
-    ));
-    // The format above declares %b_... and %a_...; use local aliases.
-    let _ = (&a, &b);
-    let an = emit_number_check(out, id, offset, "a");
-    let bn = emit_number_check(out, id, offset, "b");
-    out.push_str(&format!("  %both_{id}_{offset} = and i1 {an}, {bn}\n"));
-    out.push_str(&format!(
-        "  br i1 %both_{id}_{offset}, label %bb{id}_fast_{offset}, label %bb{id}_slow_{offset}\n\n"
-    ));
-    out.push_str(&format!("bb{id}_fast_{offset}:\n"));
-    out.push_str(&format!(
-        "  %bv_{id}_{offset} = call i64 @sloth_rt_pop(ptr %vm)\n"
-    ));
-    out.push_str(&format!(
-        "  %av_{id}_{offset} = call i64 @sloth_rt_pop(ptr %vm)\n"
-    ));
-    out.push_str(&format!(
-        "  %ad_{id}_{offset} = bitcast i64 %av_{id}_{offset} to double\n"
-    ));
-    out.push_str(&format!(
-        "  %bd_{id}_{offset} = bitcast i64 %bv_{id}_{offset} to double\n"
-    ));
-    out.push_str(fast_body);
-    out.push_str(&format!(
-        "  call void @{push_fn}(ptr %vm, i64 %resbits_{id}_{offset})\n"
-    ));
-}
-
-fn emit_instruction(
-    out: &mut String,
-    chunk: &Chunk,
+struct Emitter<'a> {
+    out: &'a mut String,
     id: usize,
-    offset: usize,
-    len: usize,
-    instr: &Instr,
-    offsets: &HashSet<usize>,
-) {
-    let next = offset + len;
-    let next_label = if offsets.contains(&next) {
-        format!("%bb{id}_{next}")
-    } else {
-        format!("%bb{id}_bad")
-    };
-    let after = format!("%bb{id}_after_{offset}");
+    seq: usize,
+    extra: i64,
+}
 
-    out.push_str(&format!("bb{id}_{offset}:\n"));
-    out.push_str(&format!(
-        "  call void @sloth_rt_set_pc(ptr %vm, i64 {offset})\n"
-    ));
+impl<'a> Emitter<'a> {
+    fn fresh(&mut self, prefix: &str) -> String {
+        self.seq += 1;
+        format!("%{prefix}{}_{}", self.id, self.seq)
+    }
 
-    match instr {
-        Instr::PushNil => {
-            out.push_str(&format!(
-                "  call void @sloth_rt_push(ptr %vm, i64 {})\n",
-                Value::NIL_BITS
-            ));
-        }
-        Instr::LoadTrue => {
-            out.push_str(&format!(
-                "  call void @sloth_rt_push(ptr %vm, i64 {})\n",
-                Value::TRUE_BITS
-            ));
-        }
-        Instr::LoadFalse => {
-            out.push_str(&format!(
-                "  call void @sloth_rt_push(ptr %vm, i64 {})\n",
-                Value::FALSE_BITS
-            ));
-        }
-        Instr::Load(index) => match chunk.constants.get(*index).map(|v| v.kind()) {
-            Some(ValueKind::Number(number)) if !number.is_nan() => {
-                out.push_str(&format!(
-                    "  call void @sloth_rt_push(ptr %vm, i64 {})\n",
-                    number.to_bits()
-                ));
-            }
-            _ => {
-                out.push_str(&format!(
-                    "  call void @sloth_rt_push_const(ptr %vm, i64 {index})\n"
-                ));
-            }
-        },
-        Instr::GetLocal(index) => {
-            out.push_str(&format!(
-                "  %lv_{id}_{offset} = call i64 @sloth_rt_local_get(ptr %vm, i64 {index})\n"
-            ));
-            out.push_str(&format!(
-                "  call void @sloth_rt_push(ptr %vm, i64 %lv_{id}_{offset})\n"
-            ));
-        }
-        Instr::SetLocal(index) => {
-            out.push_str(&format!(
-                "  %sv_{id}_{offset} = call i64 @sloth_rt_pop(ptr %vm)\n"
-            ));
-            out.push_str(&format!(
-                "  call void @sloth_rt_local_set(ptr %vm, i64 {index}, i64 %sv_{id}_{offset})\n"
-            ));
-        }
-        Instr::Pop => {
-            out.push_str("  call void @sloth_rt_pop_discard(ptr %vm)\n");
-        }
-        Instr::Swap2 => {
-            out.push_str("  call void @sloth_rt_swap2(ptr %vm)\n");
-        }
-        Instr::Jump(relative) => {
-            let target = jump_target(offset, *relative);
-            if offsets.contains(&target) {
-                out.push_str(&format!(
-                    "  call void @sloth_rt_set_pc(ptr %vm, i64 {target})\n"
-                ));
-                out.push_str(&format!("  br label %bb{id}_{target}\n\n"));
-            } else {
-                out.push_str(&format!("  br label %bb{id}_bad\n\n"));
-            }
-            return;
-        }
-        Instr::JumpIfNot(relative) | Instr::JumpIfTrue(relative) => {
-            let target = jump_target(offset, *relative);
-            let is_not = matches!(instr, Instr::JumpIfNot(_));
-            out.push_str(&format!(
-                "  %t_{id}_{offset} = call i32 @sloth_rt_top_truthy(ptr %vm)\n"
-            ));
-            if is_not {
-                out.push_str(&format!(
-                    "  %cond_{id}_{offset} = icmp eq i32 %t_{id}_{offset}, 0\n"
-                ));
-            } else {
-                out.push_str(&format!(
-                    "  %cond_{id}_{offset} = icmp ne i32 %t_{id}_{offset}, 0\n"
-                ));
-            }
-            out.push_str(&format!(
-                "  br i1 %cond_{id}_{offset}, label %bb{id}_jt_{offset}, label %bb{id}_jf_{offset}\n\n"
-            ));
-            out.push_str(&format!("bb{id}_jt_{offset}:\n"));
-            if offsets.contains(&target) {
-                out.push_str(&format!(
-                    "  call void @sloth_rt_set_pc(ptr %vm, i64 {target})\n"
-                ));
-                out.push_str(&format!("  br label %bb{id}_{target}\n\n"));
-            } else {
-                out.push_str(&format!("  br label %bb{id}_bad\n\n"));
-            }
-            out.push_str(&format!("bb{id}_jf_{offset}:\n"));
-            if offsets.contains(&next) {
-                out.push_str(&format!(
-                    "  call void @sloth_rt_set_pc(ptr %vm, i64 {next})\n"
-                ));
-                out.push_str(&format!("  br label %bb{id}_{next}\n\n"));
-            } else {
-                out.push_str(&format!("  br label %bb{id}_bad\n\n"));
-            }
-            return;
-        }
-        Instr::Add | Instr::Sub | Instr::Mul => {
-            let op = match instr {
-                Instr::Add => "fadd",
-                Instr::Sub => "fsub",
-                Instr::Mul => "fmul",
-                _ => unreachable!(),
-            };
-            let body = format!(
-                "  %res_{id}_{offset} = {op} double %ad_{id}_{offset}, %bd_{id}_{offset}\n  %resbits_{id}_{offset} = bitcast double %res_{id}_{offset} to i64\n"
-            );
-            emit_binary_fast(out, id, offset, &body, "sloth_rt_push_number");
-            out.push_str(&format!("  br label {after}\n\n"));
-            out.push_str(&format!("bb{id}_slow_{offset}:\n"));
-            let (opcode, operand) = opcode_operand(instr);
-            emit_exec(out, id, offset, opcode, operand, &after);
-            out.push_str("\n");
-            emit_after(out, id, offset, &next_label);
-            return;
-        }
-        Instr::Negate => {
-            out.push_str(&format!(
-                "  %v_{id}_{offset} = call i64 @sloth_rt_peek_raw(ptr %vm, i64 0)\n"
-            ));
-            let num = emit_number_check(out, id, offset, "v");
-            out.push_str(&format!(
-                "  br i1 {num}, label %bb{id}_fast_{offset}, label %bb{id}_slow_{offset}\n\n"
-            ));
-            out.push_str(&format!("bb{id}_fast_{offset}:\n"));
-            out.push_str(&format!(
-                "  %nv_{id}_{offset} = call i64 @sloth_rt_pop(ptr %vm)\n"
-            ));
-            out.push_str(&format!(
-                "  %nd_{id}_{offset} = bitcast i64 %nv_{id}_{offset} to double\n"
-            ));
-            out.push_str(&format!(
-                "  %nr_{id}_{offset} = fneg double %nd_{id}_{offset}\n"
-            ));
-            out.push_str(&format!(
-                "  %nb_{id}_{offset} = bitcast double %nr_{id}_{offset} to i64\n"
-            ));
-            out.push_str(&format!(
-                "  call void @sloth_rt_push_number(ptr %vm, i64 %nb_{id}_{offset})\n"
-            ));
-            out.push_str(&format!("  br label {after}\n\n"));
-            out.push_str(&format!("bb{id}_slow_{offset}:\n"));
-            let (opcode, operand) = opcode_operand(instr);
-            emit_exec(out, id, offset, opcode, operand, &after);
-            out.push_str("\n");
-            emit_after(out, id, offset, &next_label);
-            return;
-        }
-        Instr::Gt | Instr::Lt | Instr::Ge | Instr::Le | Instr::Eq | Instr::Ne => {
-            let pred = match instr {
-                Instr::Gt => "ogt",
-                Instr::Lt => "olt",
-                Instr::Ge => "oge",
-                Instr::Le => "ole",
-                Instr::Eq | Instr::Ne => "olt",
-                _ => unreachable!(),
-            };
-            let body = if matches!(instr, Instr::Eq | Instr::Ne) {
-                let cmp = if matches!(instr, Instr::Eq) {
-                    "olt"
-                } else {
-                    "oge"
-                };
-                format!(
-                    "  %diff_{id}_{offset} = fsub double %ad_{id}_{offset}, %bd_{id}_{offset}\n  %abs_{id}_{offset} = call double @llvm.fabs.f64(double %diff_{id}_{offset})\n  %cmp_{id}_{offset} = fcmp {cmp} double %abs_{id}_{offset}, 1.000000e-05\n  %resbits_{id}_{offset} = select i1 %cmp_{id}_{offset}, i64 {}, i64 {}\n",
-                    Value::TRUE_BITS,
-                    Value::FALSE_BITS
-                )
-            } else {
-                format!(
-                    "  %cmp_{id}_{offset} = fcmp {pred} double %ad_{id}_{offset}, %bd_{id}_{offset}\n  %resbits_{id}_{offset} = select i1 %cmp_{id}_{offset}, i64 {}, i64 {}\n",
-                    Value::TRUE_BITS,
-                    Value::FALSE_BITS
-                )
-            };
-            emit_binary_fast(out, id, offset, &body, "sloth_rt_push");
-            out.push_str(&format!("  br label {after}\n\n"));
-            out.push_str(&format!("bb{id}_slow_{offset}:\n"));
-            let (opcode, operand) = opcode_operand(instr);
-            emit_exec(out, id, offset, opcode, operand, &after);
-            out.push_str("\n");
-            emit_after(out, id, offset, &next_label);
-            return;
-        }
-        Instr::Not => {
-            out.push_str(&format!(
-                "  %nv_{id}_{offset} = call i64 @sloth_rt_peek_raw(ptr %vm, i64 0)\n"
-            ));
-            out.push_str(&format!(
-                "  %nt_{id}_{offset} = icmp eq i64 %nv_{id}_{offset}, {}\n",
-                Value::TRUE_BITS
-            ));
-            out.push_str(&format!(
-                "  %nf_{id}_{offset} = icmp eq i64 %nv_{id}_{offset}, {}\n",
-                Value::FALSE_BITS
-            ));
-            out.push_str(&format!(
-                "  %nbool_{id}_{offset} = or i1 %nt_{id}_{offset}, %nf_{id}_{offset}\n"
-            ));
-            out.push_str(&format!(
-                "  br i1 %nbool_{id}_{offset}, label %bb{id}_fast_{offset}, label %bb{id}_slow_{offset}\n\n"
-            ));
-            out.push_str(&format!("bb{id}_fast_{offset}:\n"));
-            out.push_str(&format!(
-                "  %np_{id}_{offset} = call i64 @sloth_rt_pop(ptr %vm)\n"
-            ));
-            out.push_str(&format!(
-                "  %nres_{id}_{offset} = select i1 %nt_{id}_{offset}, i64 {}, i64 {}\n",
-                Value::FALSE_BITS,
-                Value::TRUE_BITS
-            ));
-            out.push_str(&format!(
-                "  call void @sloth_rt_push(ptr %vm, i64 %nres_{id}_{offset})\n"
-            ));
-            out.push_str(&format!("  br label {after}\n\n"));
-            out.push_str(&format!("bb{id}_slow_{offset}:\n"));
-            let (opcode, operand) = opcode_operand(instr);
-            emit_exec(out, id, offset, opcode, operand, &after);
-            out.push_str("\n");
-            emit_after(out, id, offset, &next_label);
-            return;
-        }
-        _ => {
-            let (opcode, operand) = opcode_operand(instr);
-            emit_exec(out, id, offset, opcode, operand, &after);
-            out.push_str("\n");
-            emit_after(out, id, offset, &next_label);
-            return;
+    fn fresh_label(&mut self, prefix: &str) -> String {
+        self.seq += 1;
+        format!("bb{}_{}_{}", self.id, prefix, self.seq)
+    }
+
+    fn line(&mut self, text: &str) {
+        self.out.push_str("  ");
+        self.out.push_str(text);
+        self.out.push('\n');
+    }
+
+    fn label(&mut self, label: &str) {
+        self.out.push_str(label);
+        self.out.push_str(":\n");
+    }
+
+    fn next_label(&self, offset: usize, len: usize, offsets: &HashSet<usize>) -> String {
+        let next = offset + len;
+        if offsets.contains(&next) {
+            format!("%bb{}_{}", self.id, next)
+        } else {
+            format!("%bb{}_bad", self.id)
         }
     }
 
-    out.push_str(&format!("  br label {after}\n\n"));
-    emit_after(out, id, offset, &next_label);
-}
+    fn emit_reload(&mut self) {
+        let extra = self.extra;
+        self.line(&format!(
+            "call void @sloth_rt_stack_ensure(ptr %vm, i64 {extra})"
+        ));
+    }
 
-fn emit_after(out: &mut String, id: usize, offset: usize, next_label: &str) {
-    out.push_str(&format!("bb{id}_after_{offset}:\n"));
-    out.push_str(&format!("  br label {next_label}\n\n"));
+    fn emit_set_pc(&mut self, offset: usize) {
+        self.line(&format!(
+            "call void @sloth_rt_set_pc(ptr %vm, i64 {offset})"
+        ));
+    }
+
+    fn push_bits(&mut self, bits: &str) {
+        let data = self.fresh("d");
+        let sp = self.fresh("sp");
+        let slot = self.fresh("slot");
+        let next = self.fresh("spn");
+        self.line(&format!("{data} = load ptr, ptr @sloth_rt_stack_data"));
+        self.line(&format!("{sp} = load i64, ptr @sloth_rt_stack_len"));
+        self.line(&format!("{slot} = getelementptr i64, ptr {data}, i64 {sp}"));
+        self.line(&format!("store i64 {bits}, ptr {slot}"));
+        self.line(&format!("{next} = add i64 {sp}, 1"));
+        self.line(&format!("store i64 {next}, ptr @sloth_rt_stack_len"));
+    }
+
+    fn pop_raw(&mut self) -> String {
+        let data = self.fresh("d");
+        let sp = self.fresh("sp");
+        let next = self.fresh("spn");
+        let slot = self.fresh("slot");
+        let bits = self.fresh("bits");
+        self.line(&format!("{data} = load ptr, ptr @sloth_rt_stack_data"));
+        self.line(&format!("{sp} = load i64, ptr @sloth_rt_stack_len"));
+        self.line(&format!("{next} = sub i64 {sp}, 1"));
+        self.line(&format!("store i64 {next}, ptr @sloth_rt_stack_len"));
+        self.line(&format!(
+            "{slot} = getelementptr i64, ptr {data}, i64 {next}"
+        ));
+        self.line(&format!("{bits} = load i64, ptr {slot}"));
+        bits
+    }
+
+    fn peek_raw(&mut self, depth: i64) -> String {
+        let data = self.fresh("d");
+        let sp = self.fresh("sp");
+        let index = self.fresh("idx");
+        let slot = self.fresh("slot");
+        let bits = self.fresh("bits");
+        self.line(&format!("{data} = load ptr, ptr @sloth_rt_stack_data"));
+        self.line(&format!("{sp} = load i64, ptr @sloth_rt_stack_len"));
+        self.line(&format!("{index} = sub i64 {sp}, {}", depth + 1));
+        self.line(&format!(
+            "{slot} = getelementptr i64, ptr {data}, i64 {index}"
+        ));
+        self.line(&format!("{bits} = load i64, ptr {slot}"));
+        bits
+    }
+
+    fn local_slot(&mut self, index: usize) -> String {
+        let data = self.fresh("d");
+        let base = self.fresh("base");
+        let slot = self.fresh("slot");
+        self.line(&format!("{data} = load ptr, ptr @sloth_rt_stack_data"));
+        self.line(&format!("{base} = load i64, ptr @sloth_rt_frame_base"));
+        self.line(&format!(
+            "{slot} = getelementptr i64, ptr {data}, i64 {base}"
+        ));
+        if index == 0 {
+            slot
+        } else {
+            let indexed = self.fresh("slot");
+            self.line(&format!(
+                "{indexed} = getelementptr i64, ptr {slot}, i64 {index}"
+            ));
+            indexed
+        }
+    }
+
+    fn load_local(&mut self, index: usize) -> String {
+        let slot = self.local_slot(index);
+        let bits = self.fresh("bits");
+        self.line(&format!("{bits} = load i64, ptr {slot}"));
+        bits
+    }
+
+    /// Emit a branch that retains `bits` when it holds a reference counted
+    /// payload.  Execution continues in the returned block.
+    fn retain_if_needed(&mut self, bits: &str) -> String {
+        let top = self.fresh("top");
+        let is_string = self.fresh("is_str");
+        let is_boxed = self.fresh("is_box");
+        let needed = self.fresh("needs_rc");
+        let retain = self.fresh_label("retain");
+        let cont = self.fresh_label("retained");
+        self.line(&format!("{top} = lshr i64 {bits}, 48"));
+        self.line(&format!("{is_string} = icmp eq i64 {top}, 32763"));
+        self.line(&format!("{is_boxed} = icmp eq i64 {top}, 65534"));
+        self.line(&format!("{needed} = or i1 {is_string}, {is_boxed}"));
+        self.line(&format!("br i1 {needed}, label %{retain}, label %{cont}"));
+        self.label(&retain);
+        self.line(&format!("call void @sloth_rt_retain(i64 {bits})"));
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
+        cont
+    }
+
+    /// Emit a conditional `sloth_rt_release` call for `bits`.  Execution
+    /// continues in the returned block.
+    fn release_bits(&mut self, bits: &str) -> String {
+        let top = self.fresh("top");
+        let is_string = self.fresh("is_str");
+        let is_boxed = self.fresh("is_box");
+        let needed = self.fresh("needs_rc");
+        let release = self.fresh_label("release");
+        let cont = self.fresh_label("released");
+        self.line(&format!("{top} = lshr i64 {bits}, 48"));
+        self.line(&format!("{is_string} = icmp eq i64 {top}, 32763"));
+        self.line(&format!("{is_boxed} = icmp eq i64 {top}, 65534"));
+        self.line(&format!("{needed} = or i1 {is_string}, {is_boxed}"));
+        self.line(&format!("br i1 {needed}, label %{release}, label %{cont}"));
+        self.label(&release);
+        self.line(&format!("call void @sloth_rt_release(i64 {bits})"));
+        self.line(&format!("br label %{cont}"));
+        self.label(&cont);
+        cont
+    }
+
+    fn number_check(&mut self, bits: &str) -> String {
+        let top = self.fresh("top");
+        let mask = self.fresh("mask");
+        let is7 = self.fresh("is7");
+        let isf = self.fresh("isf");
+        let tagged = self.fresh("tagged");
+        let is_num = self.fresh("is_num");
+        self.line(&format!("{top} = lshr i64 {bits}, 48"));
+        self.line(&format!("{mask} = and i64 {top}, 65528"));
+        self.line(&format!("{is7} = icmp eq i64 {mask}, 32760"));
+        self.line(&format!("{isf} = icmp eq i64 {mask}, 65528"));
+        self.line(&format!("{tagged} = or i1 {is7}, {isf}"));
+        self.line(&format!("{is_num} = xor i1 {tagged}, true"));
+        is_num
+    }
+
+    fn truthy(&mut self, bits: &str) -> String {
+        let is_false = self.fresh("is_false");
+        let is_nil = self.fresh("is_nil");
+        let falsy = self.fresh("falsy");
+        let truthy = self.fresh("truthy");
+        self.line(&format!(
+            "{is_false} = icmp eq i64 {bits}, {}",
+            Value::FALSE_BITS
+        ));
+        self.line(&format!(
+            "{is_nil} = icmp eq i64 {bits}, {}",
+            Value::NIL_BITS
+        ));
+        self.line(&format!("{falsy} = or i1 {is_false}, {is_nil}"));
+        self.line(&format!("{truthy} = xor i1 {falsy}, true"));
+        truthy
+    }
+
+    /// Shared arithmetic fast/slow path.
+    fn emit_arith(&mut self, offset: usize, next: &str, op: &str, kind: u64, div_check: bool) {
+        let b_bits = self.peek_raw(0);
+        let a_bits = self.peek_raw(1);
+        let a_num = self.number_check(&a_bits);
+        let b_num = self.number_check(&b_bits);
+        let both = self.fresh("both_num");
+        self.line(&format!("{both} = and i1 {a_num}, {b_num}"));
+        let fast = self.fresh_label("fast");
+        let slow = self.fresh_label("slow");
+        let after = self.fresh_label("after");
+        self.line(&format!("br i1 {both}, label %{fast}, label %{slow}"));
+        self.label(&fast);
+        if div_check {
+            let b_double = self.fresh("b_check");
+            let ok = self.fresh("div_ok");
+            let compute = self.fresh_label("compute");
+            self.line(&format!("{b_double} = bitcast i64 {b_bits} to double"));
+            self.line(&format!("{ok} = fcmp oge double {b_double}, 1.000000e-05"));
+            self.line(&format!("br i1 {ok}, label %{compute}, label %{slow}"));
+            self.label(&compute);
+        }
+        let b_value = self.pop_raw();
+        let a_value = self.pop_raw();
+        let a_double = self.fresh("ad");
+        let b_double = self.fresh("bd");
+        let result = self.fresh("res");
+        self.line(&format!("{a_double} = bitcast i64 {a_value} to double"));
+        self.line(&format!("{b_double} = bitcast i64 {b_value} to double"));
+        self.line(&format!("{result} = {op} double {a_double}, {b_double}"));
+        let result_bits = self.fresh("res_bits");
+        self.line(&format!("{result_bits} = bitcast double {result} to i64"));
+        self.push_bits(&result_bits);
+        self.line(&format!("br label %{after}"));
+        self.label(&slow);
+        let slow_result = self.fresh("slow");
+        self.line(&format!(
+            "{slow_result} = call i32 @sloth_rt_binary_slow(ptr %vm, i64 {kind}, i64 {offset})"
+        ));
+        self.emit_result_value(&slow_result, &after);
+        self.label(&after);
+        self.line(&format!("br label {next}"));
+    }
+
+    fn emit_compare(
+        &mut self,
+        offset: usize,
+        next: &str,
+        kind: u64,
+        pred: &str,
+        eq_pred: Option<&str>,
+    ) {
+        let b_bits = self.peek_raw(0);
+        let a_bits = self.peek_raw(1);
+        let a_num = self.number_check(&a_bits);
+        let b_num = self.number_check(&b_bits);
+        let both = self.fresh("both_num");
+        self.line(&format!("{both} = and i1 {a_num}, {b_num}"));
+        let fast = self.fresh_label("fast");
+        let slow = self.fresh_label("slow");
+        let after = self.fresh_label("after");
+        self.line(&format!("br i1 {both}, label %{fast}, label %{slow}"));
+        self.label(&fast);
+        let b_value = self.pop_raw();
+        let a_value = self.pop_raw();
+        let a_double = self.fresh("ad");
+        let b_double = self.fresh("bd");
+        self.line(&format!("{a_double} = bitcast i64 {a_value} to double"));
+        self.line(&format!("{b_double} = bitcast i64 {b_value} to double"));
+        let result = self.fresh("cmp_bits");
+        if let Some(eq_pred) = eq_pred {
+            let diff = self.fresh("diff");
+            let abs = self.fresh("abs");
+            let cmp = self.fresh("cmp");
+            self.line(&format!("{diff} = fsub double {a_double}, {b_double}"));
+            self.line(&format!(
+                "{abs} = call double @llvm.fabs.f64(double {diff})"
+            ));
+            self.line(&format!(
+                "{cmp} = fcmp {eq_pred} double {abs}, 1.000000e-05"
+            ));
+            self.line(&format!(
+                "{result} = select i1 {cmp}, i64 {}, i64 {}",
+                Value::TRUE_BITS,
+                Value::FALSE_BITS
+            ));
+        } else {
+            let cmp = self.fresh("cmp");
+            self.line(&format!(
+                "{cmp} = fcmp {pred} double {a_double}, {b_double}"
+            ));
+            self.line(&format!(
+                "{result} = select i1 {cmp}, i64 {}, i64 {}",
+                Value::TRUE_BITS,
+                Value::FALSE_BITS
+            ));
+        }
+        self.push_bits(&result);
+        self.line(&format!("br label %{after}"));
+        self.label(&slow);
+        let slow_result = self.fresh("slow");
+        self.line(&format!(
+            "{slow_result} = call i32 @sloth_rt_binary_slow(ptr %vm, i64 {kind}, i64 {offset})"
+        ));
+        self.emit_result_value(&slow_result, &after);
+        self.label(&after);
+        self.line(&format!("br label {next}"));
+    }
+
+    fn emit_instruction(
+        &mut self,
+        chunk: &Chunk,
+        offset: usize,
+        len: usize,
+        instr: Instr,
+        offsets: &HashSet<usize>,
+    ) {
+        self.label(&format!("bb{}_{}", self.id, offset));
+        let next = self.next_label(offset, len, offsets);
+        let next_offset = offset + len;
+
+        match instr {
+            Instr::PushNil => {
+                self.push_bits(&Value::NIL_BITS.to_string());
+                self.line(&format!("br label {next}"));
+            }
+            Instr::LoadTrue => {
+                self.push_bits(&Value::TRUE_BITS.to_string());
+                self.line(&format!("br label {next}"));
+            }
+            Instr::LoadFalse => {
+                self.push_bits(&Value::FALSE_BITS.to_string());
+                self.line(&format!("br label {next}"));
+            }
+            Instr::Load(index) => match chunk.constants.get(index).map(|v| v.kind()) {
+                Some(ValueKind::Number(number)) if !number.is_nan() => {
+                    self.push_bits(&number.to_bits().to_string());
+                    self.line(&format!("br label {next}"));
+                }
+                _ => {
+                    let bits = self.fresh("const");
+                    self.line(&format!(
+                        "{bits} = call i64 @sloth_rt_get_const(ptr %vm, i64 {index})"
+                    ));
+                    self.push_bits(&bits);
+                    self.line(&format!("br label {next}"));
+                }
+            },
+            Instr::GetLocal(index) => {
+                let bits = self.load_local(index);
+                self.retain_if_needed(&bits);
+                self.push_bits(&bits);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::SetLocal(index) => {
+                let bits = self.pop_raw();
+                let slot = self.local_slot(index);
+                let old = self.fresh("old");
+                self.line(&format!("{old} = load i64, ptr {slot}"));
+                self.line(&format!("store i64 {bits}, ptr {slot}"));
+                self.release_bits(&old);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::GetGlobal(index) => {
+                let bits = self.fresh("global");
+                self.line(&format!(
+                    "{bits} = call i64 @sloth_rt_get_global(ptr %vm, i64 {index})"
+                ));
+                self.push_bits(&bits);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::SetGlobal(index) => {
+                let bits = self.pop_raw();
+                self.line(&format!(
+                    "call void @sloth_rt_set_global(ptr %vm, i64 {index}, i64 {bits})"
+                ));
+                self.line(&format!("br label {next}"));
+            }
+            Instr::GetUpValue(index) => {
+                let bits = self.fresh("upvalue");
+                self.line(&format!(
+                    "{bits} = call i64 @sloth_rt_get_upvalue(ptr %vm, i64 {index})"
+                ));
+                self.push_bits(&bits);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::SetUpValue(index) => {
+                let bits = self.pop_raw();
+                self.line(&format!(
+                    "call void @sloth_rt_set_upvalue(ptr %vm, i64 {index}, i64 {bits})"
+                ));
+                self.line(&format!("br label {next}"));
+            }
+            Instr::GetThis => {
+                let bits = self.fresh("this");
+                self.line(&format!("{bits} = call i64 @sloth_rt_get_this(ptr %vm)"));
+                self.push_bits(&bits);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::Pop => {
+                let bits = self.pop_raw();
+                self.release_bits(&bits);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::Swap2 => {
+                let data = self.fresh("d");
+                let sp = self.fresh("sp");
+                let below = self.fresh("below");
+                let a_slot = self.fresh("a_slot");
+                let b_slot = self.fresh("b_slot");
+                let a = self.fresh("a");
+                let b = self.fresh("b");
+                self.line(&format!("{data} = load ptr, ptr @sloth_rt_stack_data"));
+                self.line(&format!("{sp} = load i64, ptr @sloth_rt_stack_len"));
+                self.line(&format!("{below} = sub i64 {sp}, 2"));
+                self.line(&format!(
+                    "{a_slot} = getelementptr i64, ptr {data}, i64 {below}"
+                ));
+                self.line(&format!(
+                    "{b_slot} = getelementptr i64, ptr {a_slot}, i64 1"
+                ));
+                self.line(&format!("{a} = load i64, ptr {a_slot}"));
+                self.line(&format!("{b} = load i64, ptr {b_slot}"));
+                self.line(&format!("store i64 {b}, ptr {a_slot}"));
+                self.line(&format!("store i64 {a}, ptr {b_slot}"));
+                self.line(&format!("br label {next}"));
+            }
+            Instr::Jump(relative) => {
+                let target = jump_target(offset, relative);
+                if offsets.contains(&target) {
+                    self.line(&format!("br label %bb{}_{}", self.id, target));
+                } else {
+                    self.line(&format!(
+                        "call void @sloth_rt_set_pc(ptr %vm, i64 {offset})"
+                    ));
+                    self.line(&format!("br label %bb{}_bad", self.id));
+                }
+            }
+            Instr::JumpIfNot(relative) | Instr::JumpIfTrue(relative) => {
+                let target = jump_target(offset, relative);
+                let bits = self.peek_raw(0);
+                let truthy = self.truthy(&bits);
+                let is_not = matches!(instr, Instr::JumpIfNot(_));
+                let taken = self.fresh_label("jt");
+                let not_taken = self.fresh_label("jf");
+                if is_not {
+                    self.line(&format!(
+                        "br i1 {truthy}, label %{not_taken}, label %{taken}"
+                    ));
+                } else {
+                    self.line(&format!(
+                        "br i1 {truthy}, label %{taken}, label %{not_taken}"
+                    ));
+                }
+                self.label(&taken);
+                if offsets.contains(&target) {
+                    self.line(&format!("br label %bb{}_{}", self.id, target));
+                } else {
+                    self.line(&format!(
+                        "call void @sloth_rt_set_pc(ptr %vm, i64 {offset})"
+                    ));
+                    self.line(&format!("br label %bb{}_bad", self.id));
+                }
+                self.label(&not_taken);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::Add => self.emit_arith(offset, &next, "fadd", 0, false),
+            Instr::Sub => self.emit_arith(offset, &next, "fsub", 1, false),
+            Instr::Mul => self.emit_arith(offset, &next, "fmul", 2, false),
+            Instr::Div => self.emit_arith(offset, &next, "fdiv", 3, true),
+            Instr::Mod => self.emit_arith(offset, &next, "frem", 4, true),
+            Instr::Negate => {
+                let bits = self.peek_raw(0);
+                let is_num = self.number_check(&bits);
+                let fast = self.fresh_label("neg_fast");
+                let slow = self.fresh_label("neg_slow");
+                let after = self.fresh_label("neg_after");
+                self.line(&format!("br i1 {is_num}, label %{fast}, label %{slow}"));
+                self.label(&fast);
+                let value = self.pop_raw();
+                let double = self.fresh("nd");
+                let negated = self.fresh("nr");
+                let result = self.fresh("nb");
+                self.line(&format!("{double} = bitcast i64 {value} to double"));
+                self.line(&format!("{negated} = fneg double {double}"));
+                self.line(&format!("{result} = bitcast double {negated} to i64"));
+                self.push_bits(&result);
+                self.line(&format!("br label %{after}"));
+                self.label(&slow);
+                let slow_result = self.fresh("slow");
+                self.line(&format!(
+                    "{slow_result} = call i32 @sloth_rt_unary_slow(ptr %vm, i64 0, i64 {offset})"
+                ));
+                self.emit_result_value(&slow_result, &after);
+                self.label(&after);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::Not => {
+                let bits = self.peek_raw(0);
+                let is_true = self.fresh("is_true");
+                let is_false = self.fresh("is_false");
+                let is_bool = self.fresh("is_bool");
+                self.line(&format!(
+                    "{is_true} = icmp eq i64 {bits}, {}",
+                    Value::TRUE_BITS
+                ));
+                self.line(&format!(
+                    "{is_false} = icmp eq i64 {bits}, {}",
+                    Value::FALSE_BITS
+                ));
+                self.line(&format!("{is_bool} = or i1 {is_true}, {is_false}"));
+                let fast = self.fresh_label("not_fast");
+                let slow = self.fresh_label("not_slow");
+                let after = self.fresh_label("not_after");
+                self.line(&format!("br i1 {is_bool}, label %{fast}, label %{slow}"));
+                self.label(&fast);
+                self.pop_raw();
+                let result = self.fresh("not_result");
+                self.line(&format!(
+                    "{result} = select i1 {is_true}, i64 {}, i64 {}",
+                    Value::FALSE_BITS,
+                    Value::TRUE_BITS
+                ));
+                self.push_bits(&result);
+                self.line(&format!("br label %{after}"));
+                self.label(&slow);
+                let slow_result = self.fresh("slow");
+                self.line(&format!(
+                    "{slow_result} = call i32 @sloth_rt_unary_slow(ptr %vm, i64 1, i64 {offset})"
+                ));
+                self.emit_result_value(&slow_result, &after);
+                self.label(&after);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::And | Instr::Or => {
+                let kind = if matches!(instr, Instr::And) { 5 } else { 6 };
+                let b = self.peek_raw(0);
+                let a = self.peek_raw(1);
+                let a_true = self.fresh("a_true");
+                let a_false = self.fresh("a_false");
+                let b_true = self.fresh("b_true");
+                let b_false = self.fresh("b_false");
+                let a_bool = self.fresh("a_bool");
+                let b_bool = self.fresh("b_bool");
+                let both = self.fresh("both_bool");
+                self.line(&format!("{a_true} = icmp eq i64 {a}, {}", Value::TRUE_BITS));
+                self.line(&format!(
+                    "{a_false} = icmp eq i64 {a}, {}",
+                    Value::FALSE_BITS
+                ));
+                self.line(&format!("{b_true} = icmp eq i64 {b}, {}", Value::TRUE_BITS));
+                self.line(&format!(
+                    "{b_false} = icmp eq i64 {b}, {}",
+                    Value::FALSE_BITS
+                ));
+                self.line(&format!("{a_bool} = or i1 {a_true}, {a_false}"));
+                self.line(&format!("{b_bool} = or i1 {b_true}, {b_false}"));
+                self.line(&format!("{both} = and i1 {a_bool}, {b_bool}"));
+                let fast = self.fresh_label("bool_fast");
+                let slow = self.fresh_label("bool_slow");
+                let after = self.fresh_label("bool_after");
+                self.line(&format!("br i1 {both}, label %{fast}, label %{slow}"));
+                self.label(&fast);
+                self.pop_raw();
+                self.pop_raw();
+                let result = self.fresh("bool_result");
+                if kind == 5 {
+                    self.line(&format!("{result} = and i1 {a_true}, {b_true}"));
+                } else {
+                    self.line(&format!("{result} = or i1 {a_true}, {b_true}"));
+                }
+                let bits = self.fresh("andor_bits");
+                self.line(&format!(
+                    "{bits} = select i1 {result}, i64 {}, i64 {}",
+                    Value::TRUE_BITS,
+                    Value::FALSE_BITS
+                ));
+                self.push_bits(&bits);
+                self.line(&format!("br label %{after}"));
+                self.label(&slow);
+                let slow_result = self.fresh("slow");
+                self.line(&format!(
+                    "{slow_result} = call i32 @sloth_rt_binary_slow(ptr %vm, i64 {kind}, i64 {offset})"
+                ));
+                self.emit_result_value(&slow_result, &after);
+                self.label(&after);
+                self.line(&format!("br label {next}"));
+            }
+            Instr::Gt => self.emit_compare(offset, &next, 7, "ogt", None),
+            Instr::Lt => self.emit_compare(offset, &next, 8, "olt", None),
+            Instr::Ge => self.emit_compare(offset, &next, 9, "oge", None),
+            Instr::Le => self.emit_compare(offset, &next, 10, "ole", None),
+            Instr::Eq => self.emit_compare(offset, &next, 11, "olt", Some("olt")),
+            Instr::Ne => self.emit_compare(offset, &next, 12, "olt", Some("oge")),
+            Instr::LoadChunk(index) => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("load_chunk_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_load_chunk(ptr %vm, i64 {index}, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::UnpackVA => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("unpack_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_unpack_va(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::InitArray(count) => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("init_array_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_init_array(ptr %vm, i64 {count}, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::InitDict(count) => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("init_dict_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_init_dict(ptr %vm, i64 {count}, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::Iterator => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("iterator_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_iterator(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::Next => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("next_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_next(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::MakeRange | Instr::MakeRangeClosed => {
+                let closed = if matches!(instr, Instr::MakeRangeClosed) {
+                    1
+                } else {
+                    0
+                };
+                self.emit_set_pc(offset);
+                let result = self.fresh("range_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_make_range(ptr %vm, i64 {closed}, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::ClassIs => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("class_is_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_class_is(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::InitClass => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("init_class_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_init_class(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::ClassExtend => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("class_extend_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_class_extend(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::AddMethod => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("add_method_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_add_method(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::GetSuperMethod => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("super_method_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_get_super_method(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::GetCollection => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("get_collection_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_get_collection(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::GetProperty => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("get_property_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_get_property(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::SetCollection => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("set_collection_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_set_collection(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::SetProperty => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("set_property_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_set_property(ptr %vm, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::InvokeProperty(argc) => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("invoke_property_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_invoke_property(ptr %vm, i64 {argc}, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::InvokeSuper(argc) => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("invoke_super_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_invoke_super(ptr %vm, i64 {argc}, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::Call(argc) => {
+                self.emit_set_pc(offset);
+                let result = self.fresh("call_result");
+                self.line(&format!(
+                    "{result} = call i32 @sloth_rt_call(ptr %vm, i64 {argc}, i64 {next_offset})"
+                ));
+                self.emit_result_value(&result, &next);
+            }
+            Instr::Return => {
+                let result = self.fresh("return_result");
+                self.line(&format!("{result} = call i32 @sloth_rt_return(ptr %vm)"));
+                let changed = format!("%bb{}_changed", self.id);
+                let finished = format!("%bb{}_finished", self.id);
+                let error = format!("%bb{}_err", self.id);
+                self.line(&format!(
+                    "switch i32 {result}, label {error} [\n    i32 0, label {changed}\n    i32 1, label {changed}\n    i32 2, label {finished}\n  ]"
+                ));
+            }
+            Instr::Nop => {
+                self.line(&format!("br label {next}"));
+            }
+        }
+    }
+
+    /// Emit the result switch for a dedicated ABI and reload the stack reserve
+    /// on the continue path.
+    fn emit_result_value(&mut self, result: &str, next: &str) {
+        let next = if next.starts_with('%') {
+            next.to_string()
+        } else {
+            format!("%{next}")
+        };
+        let cont = self.fresh_label("cont");
+        let changed = format!("%bb{}_changed", self.id);
+        let finished = format!("%bb{}_finished", self.id);
+        let error = format!("%bb{}_err", self.id);
+        self.line(&format!(
+            "switch i32 {result}, label {error} [\n    i32 0, label %{cont}\n    i32 1, label {changed}\n    i32 2, label {finished}\n  ]"
+        ));
+        self.label(&cont);
+        self.emit_reload();
+        self.line(&format!("br label {next}"));
+    }
 }
 
 fn decode_chunk(chunk: &Chunk) -> Result<Vec<(usize, usize, Instr)>, String> {
@@ -566,64 +1097,4 @@ fn decode_chunk(chunk: &Chunk) -> Result<Vec<(usize, usize, Instr)>, String> {
 
 fn jump_target(offset: usize, relative: i32) -> usize {
     (offset as i64 + relative as i64).max(0) as usize
-}
-
-fn opcode_operand(instr: &Instr) -> (u8, i64) {
-    use Instr::*;
-    let x = |value: usize| value as i64;
-    match instr {
-        Nop => (OpCode::Nop as u8, 0),
-        Load(v) => (OpCode::Load as u8, x(*v)),
-        LoadChunk(v) => (OpCode::LoadChunk as u8, x(*v)),
-        GetGlobal(v) => (OpCode::GetGlobal as u8, x(*v)),
-        SetGlobal(v) => (OpCode::SetGlobal as u8, x(*v)),
-        GetLocal(v) => (OpCode::GetLocal as u8, x(*v)),
-        SetLocal(v) => (OpCode::SetLocal as u8, x(*v)),
-        GetUpValue(v) => (OpCode::GetUpValue as u8, x(*v)),
-        SetUpValue(v) => (OpCode::SetUpValue as u8, x(*v)),
-        InitArray(v) => (OpCode::InitArray as u8, x(*v)),
-        InitDict(v) => (OpCode::InitDict as u8, x(*v)),
-        PushNil => (OpCode::PushNil as u8, 0),
-        GetCollection => (OpCode::GetCollection as u8, 0),
-        GetProperty => (OpCode::GetProperty as u8, 0),
-        InvokeProperty(v) => (OpCode::InvokeProperty as u8, x(*v)),
-        InvokeSuper(v) => (OpCode::InvokeSuper as u8, x(*v)),
-        SetCollection => (OpCode::SetCollection as u8, 0),
-        SetProperty => (OpCode::SetProperty as u8, 0),
-        Add => (OpCode::Add as u8, 0),
-        Sub => (OpCode::Sub as u8, 0),
-        Mul => (OpCode::Mul as u8, 0),
-        Div => (OpCode::Div as u8, 0),
-        Mod => (OpCode::Mod as u8, 0),
-        Negate => (OpCode::Negate as u8, 0),
-        Not => (OpCode::Not as u8, 0),
-        And => (OpCode::And as u8, 0),
-        Or => (OpCode::Or as u8, 0),
-        Gt => (OpCode::Gt as u8, 0),
-        Lt => (OpCode::Lt as u8, 0),
-        Ge => (OpCode::Ge as u8, 0),
-        Le => (OpCode::Le as u8, 0),
-        Eq => (OpCode::Eq as u8, 0),
-        Ne => (OpCode::Ne as u8, 0),
-        LoadTrue => (OpCode::LoadTrue as u8, 0),
-        LoadFalse => (OpCode::LoadFalse as u8, 0),
-        ClassIs => (OpCode::ClassIs as u8, 0),
-        Pop => (OpCode::Pop as u8, 0),
-        Swap2 => (OpCode::Swap2 as u8, 0),
-        Call(v) => (OpCode::Call as u8, x(*v)),
-        JumpIfNot(v) => (OpCode::JumpIfNot as u8, *v as i64),
-        JumpIfTrue(v) => (OpCode::JumpIfTrue as u8, *v as i64),
-        Jump(v) => (OpCode::Jump as u8, *v as i64),
-        Return => (OpCode::Return as u8, 0),
-        MakeRange => (OpCode::MakeRange as u8, 0),
-        MakeRangeClosed => (OpCode::MakeRangeClosed as u8, 0),
-        Iterator => (OpCode::Iterator as u8, 0),
-        Next => (OpCode::Next as u8, 0),
-        InitClass => (OpCode::InitClass as u8, 0),
-        AddMethod => (OpCode::AddMethod as u8, 0),
-        ClassExtend => (OpCode::ClassExtend as u8, 0),
-        GetSuperMethod => (OpCode::GetSuperMethod as u8, 0),
-        GetThis => (OpCode::GetThis as u8, 0),
-        UnpackVA => (OpCode::UnpackVA as u8, 0),
-    }
 }

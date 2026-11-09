@@ -1,22 +1,61 @@
 //! C ABI runtime for executables produced by the sloth AOT backend.
 //!
-//! The generated LLVM IR contains the program image and the per-chunk native
-//! templates.  This library owns the VM state (value stack, call frames,
-//! globals, upvalues, fibers, string pool and GC) and exposes small primitives
-//! for the operations that the generated IR does not inline.
+//! The generated LLVM IR contains the program image, the per-chunk native
+//! templates and direct accesses to the value stack.  This library owns the VM
+//! state (value stack, call frames, globals, upvalues, fibers, string pool and
+//! GC) and exposes one small entry point per non-inlined operation.
 
 use std::collections::HashMap;
 use std::ffi::{c_char, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use sloth_lang_core::backend::image;
-use sloth_lang_core::{fiber, math, prelude, vec, Instr, OpCode, Step, StringPool, Value, Vm};
+use sloth_lang_core::{fiber, math, prelude, vec, Instr, Step, StringPool, Value, Vm};
 
 /// Result codes shared with the generated IR.
 const RT_CONTINUE: i32 = 0;
 const RT_FRAME_CHANGED: i32 = 1;
 const RT_FINISHED: i32 = 2;
 const RT_ERROR: i32 = -1;
+
+// ===========================================================================
+// Direct value-stack access
+// ===========================================================================
+//
+// The generated code uses these globals to push/pop values and to address
+// locals without calling into the runtime for every stack operation.
+
+#[no_mangle]
+pub static mut sloth_rt_stack_data: *mut u64 = std::ptr::null_mut();
+#[no_mangle]
+pub static mut sloth_rt_stack_len: usize = 0;
+#[no_mangle]
+pub static mut sloth_rt_stack_cap: usize = 0;
+#[no_mangle]
+pub static mut sloth_rt_frame_base: usize = 0;
+
+/// Publish the VM's current stack state to the generated code.
+#[inline]
+unsafe fn sync_out(vm: &Vm) {
+    let stack = vm.get_stack();
+    sloth_rt_stack_data = stack.as_ptr() as *mut u64;
+    sloth_rt_stack_len = stack.len();
+    sloth_rt_stack_cap = stack.capacity();
+    sloth_rt_frame_base = vm.frame_bottom();
+}
+
+/// Apply the stack length maintained by the generated code to the VM's `Vec`.
+/// The generated code always initialises a slot before publishing a larger
+/// length, so `set_len` never exposes uninitialised values.
+#[inline]
+unsafe fn sync_in(vm: &mut Vm) {
+    let len = sloth_rt_stack_len;
+    let stack = vm.get_stack();
+    if len > stack.capacity() {
+        stack.reserve(len.saturating_sub(stack.len()));
+    }
+    stack.set_len(len);
+}
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
@@ -28,9 +67,11 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn exec_catching(vm: &mut Vm, instr: Instr) -> i32 {
-    let epoch = vm.frame_epoch();
-    let result = catch_unwind(AssertUnwindSafe(|| vm.exec(instr)));
+fn report_step(
+    vm: &mut Vm,
+    epoch: u64,
+    result: Result<Result<Step, sloth_lang_core::EvalError>, Box<dyn std::any::Any + Send>>,
+) -> i32 {
     match result {
         Ok(Ok(Step::Continue)) => {
             if vm.has_error() {
@@ -53,66 +94,39 @@ fn exec_catching(vm: &mut Vm, instr: Instr) -> i32 {
     }
 }
 
-fn instr_from_opcode(op: u32, operand: i64) -> Option<Instr> {
-    use OpCode::*;
-    let opcode = OpCode::from_u8(op as u8)?;
-    let x = operand as usize;
-    Some(match opcode {
-        Nop => Instr::Nop,
-        Load => Instr::Load(x),
-        LoadChunk => Instr::LoadChunk(x),
-        GetGlobal => Instr::GetGlobal(x),
-        SetGlobal => Instr::SetGlobal(x),
-        GetLocal => Instr::GetLocal(x),
-        SetLocal => Instr::SetLocal(x),
-        GetUpValue => Instr::GetUpValue(x),
-        SetUpValue => Instr::SetUpValue(x),
-        InitArray => Instr::InitArray(x),
-        InitDict => Instr::InitDict(x),
-        PushNil => Instr::PushNil,
-        GetCollection => Instr::GetCollection,
-        GetProperty => Instr::GetProperty,
-        InvokeProperty => Instr::InvokeProperty(x),
-        InvokeSuper => Instr::InvokeSuper(x),
-        SetCollection => Instr::SetCollection,
-        SetProperty => Instr::SetProperty,
-        Add => Instr::Add,
-        Sub => Instr::Sub,
-        Mul => Instr::Mul,
-        Div => Instr::Div,
-        Mod => Instr::Mod,
-        Negate => Instr::Negate,
-        Not => Instr::Not,
-        And => Instr::And,
-        Or => Instr::Or,
-        Gt => Instr::Gt,
-        Lt => Instr::Lt,
-        Ge => Instr::Ge,
-        Le => Instr::Le,
-        Eq => Instr::Eq,
-        Ne => Instr::Ne,
-        LoadTrue => Instr::LoadTrue,
-        LoadFalse => Instr::LoadFalse,
-        ClassIs => Instr::ClassIs,
-        Pop => Instr::Pop,
-        Swap2 => Instr::Swap2,
-        Call => Instr::Call(x),
-        JumpIfNot => Instr::JumpIfNot(operand as i32),
-        JumpIfTrue => Instr::JumpIfTrue(operand as i32),
-        Jump => Instr::Jump(operand as i32),
-        Return => Instr::Return,
-        MakeRange => Instr::MakeRange,
-        MakeRangeClosed => Instr::MakeRangeClosed,
-        Iterator => Instr::Iterator,
-        Next => Instr::Next,
-        InitClass => Instr::InitClass,
-        AddMethod => Instr::AddMethod,
-        ClassExtend => Instr::ClassExtend,
-        GetSuperMethod => Instr::GetSuperMethod,
-        GetThis => Instr::GetThis,
-        UnpackVA => Instr::UnpackVA,
+/// Run one dedicated slow-path operation, catching panics at the FFI boundary
+/// and re-synchronising the stack afterwards.
+fn run_op<F>(vm: &mut Vm, pc: Option<usize>, operation: F) -> i32
+where
+    F: FnOnce(&mut Vm) -> Result<Step, sloth_lang_core::EvalError>,
+{
+    let epoch = vm.frame_epoch();
+    if let Some(pc) = pc {
+        vm.set_pc(pc);
+    }
+    unsafe {
+        sync_in(vm);
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| operation(vm)));
+    unsafe {
+        sync_out(vm);
+    }
+    report_step(vm, epoch, result)
+}
+
+fn run_simple<F>(vm: &mut Vm, pc: Option<usize>, operation: F) -> i32
+where
+    F: FnOnce(&mut Vm) -> Result<(), sloth_lang_core::EvalError>,
+{
+    run_op(vm, pc, |vm| {
+        operation(vm)?;
+        Ok(Step::Continue)
     })
 }
+
+// ===========================================================================
+// VM lifecycle
+// ===========================================================================
 
 /// Create a VM from a serialized program image.
 #[no_mangle]
@@ -137,6 +151,9 @@ pub extern "C" fn sloth_rt_new(image_ptr: *const u8, image_len: usize) -> *mut V
         vm.load_native_module(Some(&name), module);
         let (name, module) = math::module_export();
         vm.load_native_module(Some(&name), module);
+        unsafe {
+            sync_out(&vm);
+        }
         Some(Box::into_raw(Box::new(vm)))
     }));
     match result {
@@ -259,156 +276,36 @@ pub extern "C" fn sloth_rt_frame_epoch(vm: *mut Vm) -> u64 {
     unsafe { (*vm).frame_epoch() }
 }
 
-/// Execute one decoded instruction.  `operand` carries the instruction's only
-/// operand; jumps pass their relative byte offset.
+/// True when the current fiber has no call frames left.
 #[no_mangle]
-pub extern "C" fn sloth_rt_exec(vm: *mut Vm, op: u32, operand: i64) -> i32 {
+pub extern "C" fn sloth_rt_finished(vm: *mut Vm) -> i32 {
     if vm.is_null() {
-        return RT_ERROR;
-    }
-    let vm = unsafe { &mut *vm };
-    let Some(instr) = instr_from_opcode(op, operand) else {
-        vm.set_last_error(format!("unknown opcode {op}"));
-        return RT_ERROR;
-    };
-    exec_catching(vm, instr)
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_rt_push(vm: *mut Vm, bits: u64) {
-    if vm.is_null() {
-        return;
-    }
-    let vm = unsafe { &mut *vm };
-    vm.get_stack().push(unsafe { Value::from_bits(bits) });
-}
-
-/// Push an f64 result.  This boxes NaN, which cannot be stored verbatim in a
-/// NaN-boxed value word.
-#[no_mangle]
-pub extern "C" fn sloth_rt_push_number(vm: *mut Vm, bits: u64) {
-    if vm.is_null() {
-        return;
-    }
-    let vm = unsafe { &mut *vm };
-    vm.get_stack().push(Value::Number(f64::from_bits(bits)));
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_rt_pop(vm: *mut Vm) -> u64 {
-    if vm.is_null() {
-        return Value::NIL_BITS;
-    }
-    let vm = unsafe { &mut *vm };
-    vm.get_stack().pop().unwrap_or(Value::Nil).into_bits()
-}
-
-/// Pop and drop the top value.
-#[no_mangle]
-pub extern "C" fn sloth_rt_pop_discard(vm: *mut Vm) {
-    if vm.is_null() {
-        return;
-    }
-    let vm = unsafe { &mut *vm };
-    let _ = vm.get_stack().pop();
-}
-
-/// Return the raw bits of the value at `depth` from the top without retaining
-/// its payload.  Only valid for immediate inspection (tag checks).
-#[no_mangle]
-pub extern "C" fn sloth_rt_peek_raw(vm: *mut Vm, depth: i64) -> u64 {
-    if vm.is_null() || depth < 0 {
-        return Value::NIL_BITS;
+        return 1;
     }
     let vm = unsafe { &*vm };
-    let stack = vm.get_stack();
-    let depth = depth as usize;
-    if depth >= stack.len() {
-        Value::NIL_BITS
+    if vm.current_chunk_id().is_none() {
+        1
     } else {
-        stack[stack.len() - 1 - depth].to_bits()
+        0
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sloth_rt_peek(vm: *mut Vm, depth: i64) -> u64 {
-    if vm.is_null() || depth < 0 {
-        return Value::NIL_BITS;
-    }
-    let vm = unsafe { &*vm };
-    let stack = vm.get_stack();
-    let depth = depth as usize;
-    if depth >= stack.len() {
-        Value::NIL_BITS
-    } else {
-        stack[stack.len() - 1 - depth].clone().into_bits()
-    }
-}
+// ===========================================================================
+// Stack helpers used by generated prologues and slow paths
+// ===========================================================================
 
+/// Ensure that at least `extra` further values fit on the value stack.
 #[no_mangle]
-pub extern "C" fn sloth_rt_top_truthy(vm: *mut Vm) -> i32 {
-    if vm.is_null() {
-        return 0;
-    }
-    let vm = unsafe { &*vm };
-    let stack = vm.get_stack();
-    stack
-        .last()
-        .map(|value| value.to_bool() as i32)
-        .unwrap_or(0)
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_rt_local_get(vm: *mut Vm, index: i64) -> u64 {
-    if vm.is_null() || index < 0 {
-        return Value::NIL_BITS;
-    }
-    let vm = unsafe { &*vm };
-    let bottom = vm.frame_bottom();
-    let stack = vm.get_stack();
-    let slot = bottom + index as usize;
-    stack.get(slot).cloned().unwrap_or(Value::Nil).into_bits()
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_rt_local_set(vm: *mut Vm, index: i64, bits: u64) {
-    if vm.is_null() || index < 0 {
-        return;
-    }
-    let vm = unsafe { &mut *vm };
-    let bottom = vm.frame_bottom();
-    let stack = vm.get_stack();
-    let slot = bottom + index as usize;
-    if slot < stack.len() {
-        stack[slot] = unsafe { Value::from_bits(bits) };
-    } else {
-        // The bytecode should never do this, but leaking one reference is safer
-        // than corrupting the stack.
-        unsafe { Value::release_bits(bits) };
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_rt_swap2(vm: *mut Vm) {
+pub extern "C" fn sloth_rt_stack_ensure(vm: *mut Vm, extra: i64) {
     if vm.is_null() {
         return;
     }
     let vm = unsafe { &mut *vm };
-    let stack = vm.get_stack();
-    let len = stack.len();
-    if len >= 2 {
-        stack.swap(len - 1, len - 2);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn sloth_rt_push_const(vm: *mut Vm, index: i64) {
-    if vm.is_null() || index < 0 {
-        return;
-    }
-    let vm = unsafe { &mut *vm };
-    if let Some(value) = vm.current_chunk_constant(index as usize) {
-        vm.get_stack().push(value);
+    unsafe {
+        sync_in(vm);
+        let extra = extra.max(0) as usize;
+        vm.get_stack().reserve(extra);
+        sync_out(vm);
     }
 }
 
@@ -422,16 +319,350 @@ pub extern "C" fn sloth_rt_release(bits: u64) {
     unsafe { Value::release_bits(bits) };
 }
 
-/// True when the current fiber has no call frames left.
+// ===========================================================================
+// Constants, globals, upvalues and `this`
+// ===========================================================================
+
 #[no_mangle]
-pub extern "C" fn sloth_rt_finished(vm: *mut Vm) -> i32 {
+pub extern "C" fn sloth_rt_get_const(vm: *mut Vm, index: i64) -> u64 {
+    if vm.is_null() || index < 0 {
+        return Value::NIL_BITS;
+    }
+    let vm = unsafe { &mut *vm };
+    vm.current_chunk_constant(index as usize)
+        .unwrap_or(Value::Nil)
+        .into_bits()
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_get_global(vm: *mut Vm, index: i64) -> u64 {
+    if vm.is_null() || index < 0 {
+        return Value::NIL_BITS;
+    }
+    let vm = unsafe { &mut *vm };
+    let result = catch_unwind(AssertUnwindSafe(|| vm.get_global_value(index as usize)));
+    match result {
+        Ok(value) => value.into_bits(),
+        Err(payload) => {
+            vm.set_last_error(panic_message(payload));
+            Value::NIL_BITS
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_set_global(vm: *mut Vm, index: i64, bits: u64) {
+    if vm.is_null() || index < 0 {
+        unsafe { Value::release_bits(bits) };
+        return;
+    }
+    let vm = unsafe { &mut *vm };
+    let value = unsafe { Value::from_bits(bits) };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        vm.set_global_value(index as usize, value)
+    }));
+    if let Err(payload) = result {
+        vm.set_last_error(panic_message(payload));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_get_upvalue(vm: *mut Vm, index: i64) -> u64 {
+    if vm.is_null() || index < 0 {
+        return Value::NIL_BITS;
+    }
+    let vm = unsafe { &mut *vm };
+    let result = catch_unwind(AssertUnwindSafe(|| vm.get_upvalue(index as usize)));
+    match result {
+        Ok(value) => value.into_bits(),
+        Err(payload) => {
+            vm.set_last_error(panic_message(payload));
+            Value::NIL_BITS
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_set_upvalue(vm: *mut Vm, index: i64, bits: u64) {
+    if vm.is_null() || index < 0 {
+        unsafe { Value::release_bits(bits) };
+        return;
+    }
+    let vm = unsafe { &mut *vm };
+    let value = unsafe { Value::from_bits(bits) };
+    let result = catch_unwind(AssertUnwindSafe(|| vm.set_upvalue(index as usize, value)));
+    if let Err(payload) = result {
+        vm.set_last_error(panic_message(payload));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_get_this(vm: *mut Vm) -> u64 {
     if vm.is_null() {
-        return 1;
+        return Value::NIL_BITS;
     }
-    let vm = unsafe { &*vm };
-    if vm.current_chunk_id().is_none() {
-        1
-    } else {
-        0
+    let vm = unsafe { &mut *vm };
+    let result = catch_unwind(AssertUnwindSafe(|| vm.get_this_value()));
+    match result {
+        Ok(value) => value.into_bits(),
+        Err(payload) => {
+            vm.set_last_error(panic_message(payload));
+            Value::NIL_BITS
+        }
     }
+}
+
+// ===========================================================================
+// Dedicated slow paths
+// ===========================================================================
+//
+// The generated code sets the VM pc to the current instruction before calling
+// an ABI that may report an error.  `next_pc` is the statically known offset
+// of the following instruction, so the shared VM operation can advance the
+// frame without decoding the bytecode again.
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_load_chunk(vm: *mut Vm, index: i64, next_pc: i64) -> i32 {
+    if vm.is_null() || index < 0 {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.load_chunk(index as usize, Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_unpack_va(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.unpack_va(Some(next_pc as usize));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_init_array(vm: *mut Vm, count: i64, next_pc: i64) -> i32 {
+    if vm.is_null() || count < 0 {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.init_array(count as usize, Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_init_dict(vm: *mut Vm, count: i64, next_pc: i64) -> i32 {
+    if vm.is_null() || count < 0 {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.init_dict(count as usize, Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_iterator(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.make_iterator(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_next(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.iterator_next(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_make_range(vm: *mut Vm, closed: i64, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.make_range(closed != 0, Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_class_is(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.class_is(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_init_class(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.init_class(Some(next_pc as usize));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_class_extend(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.class_extend(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_add_method(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.add_method(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_get_super_method(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.get_super_method(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_get_collection(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.exec_get_collection(Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_get_property(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.exec_get_property(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_set_collection(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.exec_set_collection(Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_set_property(vm: *mut Vm, next_pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| vm.exec_set_property(Some(next_pc as usize)))
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_invoke_property(vm: *mut Vm, argc: i64, next_pc: i64) -> i32 {
+    if vm.is_null() || argc < 0 {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.exec_invoke_property(argc as usize, Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_invoke_super(vm: *mut Vm, argc: i64, next_pc: i64) -> i32 {
+    if vm.is_null() || argc < 0 {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.exec_invoke_super(argc as usize, Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_call(vm: *mut Vm, argc: i64, next_pc: i64) -> i32 {
+    if vm.is_null() || argc < 0 {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_simple(vm, None, |vm| {
+        vm.call_value(argc as usize, Some(next_pc as usize))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sloth_rt_return(vm: *mut Vm) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let vm = unsafe { &mut *vm };
+    run_op(vm, None, |vm| vm.do_return())
+}
+
+/// Slow path for binary operators whose operands are not both numbers (string
+/// concatenation, array concatenation, operator overloads and type errors).
+#[no_mangle]
+pub extern "C" fn sloth_rt_binary_slow(vm: *mut Vm, kind: i64, pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let instr = match kind {
+        0 => Instr::Add,
+        1 => Instr::Sub,
+        2 => Instr::Mul,
+        3 => Instr::Div,
+        4 => Instr::Mod,
+        5 => Instr::And,
+        6 => Instr::Or,
+        7 => Instr::Gt,
+        8 => Instr::Lt,
+        9 => Instr::Ge,
+        10 => Instr::Le,
+        11 => Instr::Eq,
+        12 => Instr::Ne,
+        _ => return RT_ERROR,
+    };
+    let vm = unsafe { &mut *vm };
+    run_op(vm, Some(pc as usize), |vm| vm.exec(instr))
+}
+
+/// Slow path for unary operators whose operand is not an immediate/number.
+#[no_mangle]
+pub extern "C" fn sloth_rt_unary_slow(vm: *mut Vm, kind: i64, pc: i64) -> i32 {
+    if vm.is_null() {
+        return RT_ERROR;
+    }
+    let instr = match kind {
+        0 => Instr::Negate,
+        1 => Instr::Not,
+        _ => return RT_ERROR,
+    };
+    let vm = unsafe { &mut *vm };
+    run_op(vm, Some(pc as usize), |vm| vm.exec(instr))
 }

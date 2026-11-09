@@ -7,7 +7,6 @@ use std::{
     io::{self, Read},
 };
 
-
 macro_rules! arity_assert {
     ($n:expr, $arg_num:expr) => {
         if $arg_num != $n {
@@ -57,7 +56,7 @@ pub fn sloth_add_glob(vm: &mut Vm, arg_num: usize) {
     };
     let _ = vm.get_stack().pop();
     unsafe {
-        for (k,v) in (*p_dict).dict.iter() {
+        for (k, v) in (*p_dict).dict.iter() {
             vm.get_current_glob().insert(k.clone(), v.clone());
         }
     }
@@ -73,9 +72,7 @@ pub fn sloth_load_module(vm: &mut Vm, arg_num: usize) {
     if let ValueKind::String(path) = path.kind() {
         vm.get_stack().pop();
         if vm.has_precompiled_modules() {
-            if vm.load_precompiled_module(path.get_inner()) {
-                vm.fiber_changed = true;
-            } else {
+            if !vm.load_precompiled_module(path.get_inner()) {
                 let msg = format!(
                     "module `{}` was not precompiled for the AOT backend; only literal import paths are supported",
                     path.get_inner()
@@ -84,7 +81,6 @@ pub fn sloth_load_module(vm: &mut Vm, arg_num: usize) {
             }
             return;
         }
-        vm.fiber_changed = true;
         let full_path = vm.interpreter_cwd.join(path.get_inner());
         let mut file = File::open(&full_path).unwrap();
         let mut buf = String::new();
@@ -175,13 +171,15 @@ pub fn sloth_to_string(vm: &mut Vm, arg_num: usize) {
 pub fn sloth_va_arg(vm: &mut Vm, arg_num: usize) {
     let _ = vm.get_stack().pop();
     let va_arg_vec = vm.get_call_frame().va_args.clone();
-    let mut b_array = Box::new(Array{marked: false, array: va_arg_vec});
+    let mut b_array = Box::new(Array {
+        marked: false,
+        array: va_arg_vec,
+    });
     let p_array = b_array.as_mut() as *mut Array;
     vm.add_object(b_array);
 
     vm.get_stack().push(Value::Array(p_array));
 }
-
 
 pub fn sloth_ord(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
@@ -192,7 +190,7 @@ pub fn sloth_ord(vm: &mut Vm, arg_num: usize) {
     };
     let _ = vm.get_stack().pop();
 
-    if s.get_inner().len() != 1{
+    if s.get_inner().len() != 1 {
         panic!("ord(s): s should contains exactly **1** char.")
     }
     let val = s.get_inner().chars().next().unwrap();

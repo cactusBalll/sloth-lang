@@ -97,9 +97,6 @@ pub fn sloth_fiber_resume(vm: &mut Vm, arg_num: usize) {
             (*fiber).stack.push(pass_val);
         }
         (*fiber).prev = vm.get_current_fiber();
-        if (*fiber).state == FiberState::Initial {
-            vm.fiber_changed = true;
-        }
         (*fiber).state = FiberState::Running;
         vm.set_fiber(fiber);
     }
@@ -139,9 +136,6 @@ pub fn sloth_fiber_transfer(vm: &mut Vm, arg_num: usize) {
         (*vm.get_current_fiber()).state = FiberState::Paused;
         if (*fiber).state == FiberState::Paused {
             (*fiber).stack.push(Value::Nil);
-        }
-        if (*fiber).state == FiberState::Initial {
-            vm.fiber_changed = true;
         }
         (*fiber).state = FiberState::Running;
         vm.set_fiber(fiber);

@@ -46,7 +46,6 @@ pub enum Step {
     Finished,
 }
 
-
 pub struct Vm {
     executing_fiber: *mut Fiber,
     upvalues: Vec<*mut UpValueObject>,
@@ -65,8 +64,6 @@ pub struct Vm {
     debug: bool,
 
     pub interpreter_cwd: PathBuf,
-    /// if fiber changed, pc should not be added
-    pub fiber_changed: bool,
 
     /// Incremented whenever a call frame is pushed/popped or the executing
     /// fiber changes.  The AOT dispatcher uses it to decide when it has to
@@ -173,7 +170,6 @@ impl Vm {
             string_pool,
             debug,
             interpreter_cwd,
-            fiber_changed: false,
             frame_epoch: 0,
             precompiled_modules: None,
             last_error: None,
@@ -244,6 +240,506 @@ impl Vm {
         }
     }
 
+    /// Return a retained copy of the global whose name is the constant at
+    /// `index`.
+    pub fn get_global_value(&mut self, index: usize) -> Value {
+        let name = self
+            .current_chunk_constant(index)
+            .expect("global name constant is missing");
+        if let ValueKind::String(name) = name.kind() {
+            self.global
+                .last()
+                .and_then(|globals| globals.get(&name))
+                .cloned()
+                .unwrap_or(Value::Nil)
+        } else {
+            Value::Nil
+        }
+    }
+
+    /// Store `value` in the global whose name is the constant at `index`.
+    pub fn set_global_value(&mut self, index: usize, value: Value) {
+        let name = self
+            .current_chunk_constant(index)
+            .expect("global name constant is missing");
+        if let ValueKind::String(name) = name.kind() {
+            self.global.last_mut().unwrap().insert(name, value);
+        }
+    }
+
+    /// Build a closure from child chunk `index` (`LoadChunk`).
+    pub fn load_chunk(&mut self, index: usize, next_pc: Option<usize>) -> EvalResult {
+        let (bottom, current_closure, cur_this_ref) = {
+            let frame = self.get_call_frame();
+            (
+                frame.bottom,
+                frame.closure,
+                frame.bound_this.or(unsafe { (*frame.closure).this_ref }),
+            )
+        };
+        let chunk = self.get_chunk(index) as *const Chunk;
+        let mut upvalues = Vec::new();
+        for upval_decl in unsafe { &*chunk }.upvalues.iter() {
+            match upval_decl {
+                UpValueDecl::Ref(idx, _) => {
+                    if let Some(pos) = self.upvalues.iter().position(|p| match unsafe { &**p } {
+                        UpValueObject {
+                            marked: _,
+                            value: UpValue::Ref(idx2),
+                        } => *idx2 == (*idx) + bottom,
+                        _ => false,
+                    }) {
+                        upvalues.push(self.upvalues[pos]);
+                    } else {
+                        let upv = self.new_upvalue_object((*idx) + bottom);
+                        upvalues.push(upv);
+                    }
+                }
+                UpValueDecl::RefUpValue(idx, _) => {
+                    let upv = unsafe { (&(*current_closure).upvalues)[*idx] };
+                    upvalues.push(upv);
+                }
+            }
+        }
+        let closure = Closure {
+            marked: false,
+            chunk,
+            upvalues,
+            this_ref: cur_this_ref,
+        };
+        let mut boxed_closure = Box::new(closure);
+        let pointer = boxed_closure.as_mut() as *mut Closure;
+        self.objects.push(boxed_closure);
+        self.get_stack().push(Value::Closure(pointer));
+        self.advance_pc(next_pc);
+        Ok(())
+    }
+
+    /// Return the receiver bound to the current frame (`GetThis`).
+    pub fn get_this_value(&mut self) -> Value {
+        let frame = self.get_call_frame();
+        let this = frame
+            .bound_this
+            .or(unsafe { (*frame.closure).this_ref })
+            .expect("`this` is not bound in this frame");
+        Value::Instance(this)
+    }
+
+    /// Push the current frame's variadic arguments (`UnpackVA`).
+    pub fn unpack_va(&mut self, next_pc: Option<usize>) {
+        let args = self.get_call_frame().va_args.clone();
+        let stack = self.get_stack();
+        for arg in args {
+            stack.push(arg);
+        }
+        self.advance_pc(next_pc);
+    }
+
+    /// Create an array from the top `count` stack values (`InitArray`).
+    pub fn init_array(&mut self, count: usize, next_pc: Option<usize>) -> EvalResult {
+        self.run_gc()?;
+        let array = self.new_array(count);
+        self.get_stack().push(Value::Array(array));
+        self.advance_pc(next_pc);
+        Ok(())
+    }
+
+    /// Create a dictionary from the top `count` key/value pairs (`InitDict`).
+    pub fn init_dict(&mut self, count: usize, next_pc: Option<usize>) -> EvalResult {
+        self.run_gc()?;
+        let dict = self.new_dict(count);
+        self.get_stack().push(Value::Dictionary(dict));
+        self.advance_pc(next_pc);
+        Ok(())
+    }
+
+    /// Build a range from the top two stack values.
+    pub fn make_range(&mut self, closed: bool, next_pc: Option<usize>) -> EvalResult {
+        let (start, end) = self.stack_get_number()?;
+        let end = if closed { end + 1.0 } else { end };
+        self.get_stack().push(Value::Range(start, end));
+        self.advance_pc(next_pc);
+        Ok(())
+    }
+
+    /// Evaluate `instance is Class`.
+    pub fn class_is(&mut self, next_pc: Option<usize>) -> EvalResult {
+        let klass = self.get_stack().pop().unwrap();
+        let instance = self.get_stack().pop().unwrap();
+        if let ValueKind::Klass(klass) = klass.kind() {
+            if let ValueKind::Instance(instance) = instance.kind() {
+                unsafe {
+                    let mut current = (*instance).klass;
+                    let mut is_class = false;
+                    while current != null_mut() {
+                        if current == klass {
+                            is_class = true;
+                            break;
+                        }
+                        current = (*current).super_klass;
+                    }
+                    self.get_stack().push(Value::Bool(is_class));
+                }
+            } else {
+                self.get_stack().push(Value::Bool(false));
+            }
+            self.advance_pc(next_pc);
+            Ok(())
+        } else {
+            Err(EvalError::TypeError(self.eval_err_str(
+                "`is` can ONLY check classes, r-hand must be Class",
+            )))
+        }
+    }
+
+    /// Create an empty class object.
+    pub fn init_class(&mut self, next_pc: Option<usize>) {
+        let mut class = Box::new(Klass {
+            marked: false,
+            super_klass: null_mut(),
+            methods: HashMap::new(),
+        });
+        let pointer = class.as_mut() as *mut Klass;
+        self.objects.push(class);
+        self.get_stack().push(Value::Klass(pointer));
+        self.advance_pc(next_pc);
+    }
+
+    /// Apply a superclass to a class object (`ClassExtend`).
+    pub fn class_extend(&mut self, next_pc: Option<usize>) -> EvalResult {
+        let super_klass = self.get_stack().pop().unwrap();
+        let klass = self.get_stack().pop().unwrap();
+        if let ValueKind::Klass(klass) = klass.kind() {
+            if let ValueKind::Klass(super_klass) = super_klass.kind() {
+                unsafe {
+                    (*klass).super_klass = super_klass;
+                    for (name, closure) in &(*super_klass).methods {
+                        (*klass).methods.insert(name.clone(), closure.clone());
+                    }
+                }
+                self.get_stack().push(Value::Klass(klass));
+                self.advance_pc(next_pc);
+                Ok(())
+            } else {
+                Err(EvalError::TypeError(
+                    self.eval_err_str("Class can only extend Class"),
+                ))
+            }
+        } else {
+            Err(EvalError::Error(
+                self.eval_err_str("Class can only extend Class"),
+            ))
+        }
+    }
+
+    /// Attach a method closure to a class object (`AddMethod`).
+    pub fn add_method(&mut self, next_pc: Option<usize>) -> EvalResult {
+        let method = self.get_stack().pop().unwrap();
+        let name = self.get_stack().pop().unwrap();
+        let klass = self.get_stack().pop().unwrap();
+        if let ValueKind::Klass(klass) = klass.kind() {
+            if let ValueKind::String(name) = name.kind() {
+                if let ValueKind::Closure(method) = method.kind() {
+                    unsafe {
+                        (*klass).methods.insert(name, Value::Closure(method));
+                    }
+                }
+            }
+            self.get_stack().push(Value::Klass(klass));
+            self.advance_pc(next_pc);
+            Ok(())
+        } else {
+            Err(EvalError::Error(
+                self.eval_err_str("method target is not a Class"),
+            ))
+        }
+    }
+
+    /// Look up a method on the receiver's superclass (`GetSuperMethod`).
+    pub fn get_super_method(&mut self, next_pc: Option<usize>) -> EvalResult {
+        let index = self.get_stack().pop().unwrap();
+        let collection = self.get_stack().pop().unwrap();
+        if let ValueKind::Instance(instance) = collection.kind() {
+            if let ValueKind::String(name) = index.kind() {
+                unsafe {
+                    let mut super_class = (*instance).klass;
+                    while super_class != null_mut() {
+                        super_class = (*super_class).super_klass;
+                        if super_class == null_mut() {
+                            break;
+                        }
+                        if let Some(method) = (*super_class).methods.get(&name) {
+                            if let ValueKind::Closure(method) = method.kind() {
+                                let mut bound = (*method).clone();
+                                bound.this_ref = Some(instance);
+                                let mut boxed = Box::new(bound);
+                                let pointer = boxed.as_mut() as *mut Closure;
+                                self.objects.push(boxed);
+                                self.get_stack().push(Value::Closure(pointer));
+                                self.advance_pc(next_pc);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Err(EvalError::VariableNotFound(
+                    self.eval_err_str("method not found"),
+                ))
+            } else {
+                Err(EvalError::TypeError(
+                    self.eval_err_str("Instance can only be indexed by String"),
+                ))
+            }
+        } else {
+            Err(EvalError::Error(self.eval_err_str("invalid super lookup")))
+        }
+    }
+
+    /// Convert the top stack value into an iterator (`Iterator`).
+    pub fn make_iterator(&mut self, next_pc: Option<usize>) -> EvalResult {
+        let iterator = self.get_stack().pop().unwrap();
+        match iterator.kind() {
+            ValueKind::Range(left, right) => {
+                self.get_stack().push(Value::Range(left, right));
+            }
+            ValueKind::String(string) => {
+                self.get_stack().push(Value::StringIter(string, 0));
+            }
+            ValueKind::Array(array) => {
+                self.get_stack().push(Value::ArrayIter(array, 0));
+            }
+            ValueKind::Dictionary(dict) => unsafe {
+                let entries = (*dict)
+                    .dict
+                    .iter()
+                    .map(|(key, value)| {
+                        let entry = vec![Value::String(key.clone()), value.clone()];
+                        let mut boxed = Box::new(Array {
+                            marked: false,
+                            array: entry,
+                        });
+                        let pointer = boxed.as_mut() as *mut Array;
+                        self.objects.push(boxed);
+                        Value::Array(pointer)
+                    })
+                    .collect();
+                let mut boxed = Box::new(Array {
+                    marked: false,
+                    array: entries,
+                });
+                let pointer = boxed.as_mut() as *mut Array;
+                self.objects.push(boxed);
+                self.get_stack().push(Value::ArrayIter(pointer, 0));
+            },
+            ValueKind::Instance(instance) => {
+                let name = self.string_pool.creat_istring("__iter__");
+                if let Some(value) = unsafe { (*instance).fields.get(&name) } {
+                    let value = value.clone();
+                    self.get_stack().push(value);
+                } else if let Some(method) = unsafe { (*(*instance).klass).methods.get(&name) } {
+                    if let ValueKind::Closure(method) = method.kind() {
+                        self.get_stack().push(Value::Closure(method));
+                        self.call_top_at(0, Some(instance), false, next_pc)?;
+                        return Ok(());
+                    }
+                } else {
+                    return Err(EvalError::VariableNotFound(
+                        self.eval_err_str("method not found"),
+                    ));
+                }
+            }
+            _ => return Err(EvalError::TypeError(self.eval_err_str("not subscriptable"))),
+        }
+        self.advance_pc(next_pc);
+        Ok(())
+    }
+
+    /// Advance the top iterator and push its next value (`Next`).
+    pub fn iterator_next(&mut self, next_pc: Option<usize>) -> EvalResult {
+        let mut iterator = self.get_stack().pop().unwrap();
+        match iterator.kind() {
+            ValueKind::Range(left, right) => {
+                let value = if (left - right).abs() < f64::EPSILON {
+                    Value::Nil
+                } else if left < right {
+                    let next = left + 1.0;
+                    iterator = Value::Range(next, right);
+                    Value::Number(next - 1.0)
+                } else {
+                    let next = left - 1.0;
+                    iterator = Value::Range(next, right);
+                    Value::Number(next + 1.0)
+                };
+                self.get_stack().push(iterator);
+                self.get_stack().push(value);
+            }
+            ValueKind::ArrayIter(array, index) => unsafe {
+                if index >= (*array).array.len() {
+                    self.get_stack().push(iterator);
+                    self.get_stack().push(Value::Nil);
+                } else {
+                    let value = unsafe { (&(*array).array)[index].clone() };
+                    self.get_stack().push(Value::ArrayIter(array, index + 1));
+                    self.get_stack().push(value);
+                }
+            },
+            ValueKind::StringIter(string, index) => {
+                let next = string.get_inner().chars().skip(index).next();
+                if let Some(ch) = next {
+                    let ch = format!("{ch}");
+                    let ch = self.string_pool.creat_istring(&ch);
+                    self.get_stack().push(Value::StringIter(string, index + 1));
+                    self.get_stack().push(Value::String(ch));
+                } else {
+                    self.get_stack().push(Value::StringIter(string, index));
+                    self.get_stack().push(Value::Nil);
+                }
+            }
+            ValueKind::Instance(instance) => {
+                self.get_stack().push(iterator);
+                let name = self.string_pool.creat_istring("__next__");
+                if let Some(value) = unsafe { (*instance).fields.get(&name) } {
+                    let value = value.clone();
+                    self.get_stack().push(value);
+                } else if let Some(method) = unsafe { (*(*instance).klass).methods.get(&name) } {
+                    if let ValueKind::Closure(method) = method.kind() {
+                        self.get_stack().push(Value::Closure(method));
+                        self.call_top_at(0, Some(instance), false, next_pc)?;
+                        return Ok(());
+                    }
+                } else {
+                    return Err(EvalError::VariableNotFound(
+                        self.eval_err_str("method not found"),
+                    ));
+                }
+            }
+            _ => {
+                return Err(EvalError::VariableNotFound(
+                    self.eval_err_str("not a Iterator Object"),
+                ))
+            }
+        }
+        self.advance_pc(next_pc);
+        Ok(())
+    }
+
+    /// Call the value at `stack.len() - argc - 1`.
+    pub fn call_value(&mut self, argc: usize, next_pc: Option<usize>) -> EvalResult {
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        let callee = stack[stack.len() - argc - 1].kind();
+        match callee {
+            ValueKind::Closure(_) | ValueKind::NativeFunction(_) => {
+                self.call_top_at(argc, None, false, next_pc)?;
+            }
+            ValueKind::Klass(klass) => {
+                let class_index = stack.len() - argc - 1;
+                let mut instance = Box::new(Instance {
+                    marked: false,
+                    klass,
+                    fields: HashMap::new(),
+                });
+                let pointer = instance.as_mut() as *mut Instance;
+                self.objects.push(instance);
+                let name = self.string_pool.creat_istring("__init__");
+                if let Some(method) = unsafe { (*klass).methods.get(&name) } {
+                    if let ValueKind::Closure(method) = method.kind() {
+                        stack[class_index] = Value::Closure(method);
+                        self.call_top_at(argc, Some(pointer), false, next_pc)?;
+                    }
+                } else {
+                    for _ in 0..argc {
+                        stack.pop();
+                    }
+                    stack.pop();
+                    stack.push(Value::Instance(pointer));
+                    self.advance_pc(next_pc);
+                }
+            }
+            _ => {
+                return Err(EvalError::CallError(
+                    self.eval_err_str("calling object which is not Callable"),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    /// Pop the current call frame (`Return`).  The caller's frame is already
+    /// positioned at the instruction following the call.
+    pub fn do_return(&mut self) -> Result<Step, EvalError> {
+        let discard_return_value = self.get_call_frame().discard_return_value;
+        let callframe = unsafe { (*self.executing_fiber).call_frames.pop().unwrap() };
+        self.bump_frame_epoch();
+        let chunk = unsafe { &*(*callframe.closure).chunk };
+        let mut kept_upvalues = Vec::new();
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        for upv in self.upvalues.iter_mut() {
+            let mut escape = false;
+            let mut index = 0;
+            if let UpValue::Ref(value_index) = unsafe { &(**upv).value } {
+                if *value_index >= callframe.bottom {
+                    escape = true;
+                    index = *value_index;
+                }
+            }
+            if escape {
+                unsafe {
+                    (**upv).value = UpValue::Closed(stack[index].clone());
+                }
+            } else {
+                kept_upvalues.push(*upv);
+            }
+        }
+        self.upvalues = kept_upvalues;
+
+        if callframe.bottom + chunk.num_locals == stack.len() {
+            for _ in callframe.bottom..stack.len() {
+                stack.pop();
+            }
+            stack.pop();
+            if !discard_return_value {
+                stack.push(Value::Nil);
+            }
+        } else {
+            let value = stack.pop().unwrap();
+            for _ in callframe.bottom..stack.len() {
+                stack.pop();
+            }
+            stack.pop();
+            if !discard_return_value {
+                stack.push(value);
+            }
+        }
+
+        unsafe {
+            if (*self.executing_fiber).call_frames.is_empty() {
+                let returning = self.executing_fiber;
+                let previous = (*self.executing_fiber).prev;
+                if previous != null_mut() {
+                    self.executing_fiber = previous;
+                    self.bump_frame_epoch();
+                    if (*returning).state == FiberState::Loader {
+                        let namespace = self.global.pop().unwrap();
+                        let mut dict = Box::new(Dict {
+                            marked: false,
+                            dict: namespace,
+                        });
+                        let pointer = dict.as_mut() as *mut Dict;
+                        self.objects.push(dict);
+                        self.get_stack().push(Value::Dictionary(pointer));
+                    } else {
+                        (*returning).state = FiberState::Finished;
+                        (*previous).state = FiberState::Running;
+                        self.get_stack().push(Value::Nil);
+                    }
+                } else {
+                    return Ok(Step::Finished);
+                }
+            }
+        }
+        Ok(Step::Continue)
+    }
+
     pub fn take_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
@@ -277,7 +773,7 @@ impl Vm {
     }
 
     /// Decode and execute exactly one instruction.  `run` is implemented on top
-    /// of this method; the AOT runtime uses it for opcodes that are not inlined.
+    /// of this method; the AOT runtime uses dedicated entry points instead.
     pub fn step(&mut self) -> Result<Step, EvalError> {
         let call_frame = unsafe { (*self.executing_fiber).call_frames.last_mut().unwrap() };
         let closure = call_frame.closure;
@@ -285,11 +781,9 @@ impl Vm {
         let instr = match unsafe { (&*(&*call_frame.closure).chunk).decode(call_frame.pc) } {
             Ok((instr, _len)) => instr,
             Err(opcode) => {
-                return Err(EvalError::Error(
-                    self.eval_err_str(
-                        format!("unknown or truncated instruction {opcode:#04x}").as_ref(),
-                    ),
-                ))
+                return Err(EvalError::Error(self.eval_err_str(
+                    format!("unknown or truncated instruction {opcode:#04x}").as_ref(),
+                )))
             }
         };
         if self.debug {
@@ -310,8 +804,8 @@ impl Vm {
         self.exec(instr)
     }
 
-    /// Execute a single decoded instruction.  The AOT backend calls this for
-    /// opcodes whose slow path is not inlined in the generated IR.
+    /// Execute a single decoded instruction.  This is the interpreter's core;
+    /// the AOT backend uses dedicated entry points instead.
     pub fn exec(&mut self, instr: Instr) -> Result<Step, EvalError> {
         let call_frame = unsafe { (*self.executing_fiber).call_frames.last_mut().unwrap() };
         let closure = call_frame.closure;
@@ -502,9 +996,7 @@ impl Vm {
                     ValueKind::Number(a) => {
                         if let ValueKind::Number(b) = opr2.kind() {
                             if b < 1e-5 {
-                                return Err(EvalError::ArithmError(
-                                    self.eval_err_str("div by 0"),
-                                ));
+                                return Err(EvalError::ArithmError(self.eval_err_str("div by 0")));
                             }
                             let res = a / b;
                             stack.push(Value::Number(res));
@@ -555,9 +1047,7 @@ impl Vm {
                     ValueKind::Number(a) => {
                         if let ValueKind::Number(b) = opr2.kind() {
                             if b < 1e-5 {
-                                return Err(EvalError::ArithmError(
-                                    self.eval_err_str("div by 0"),
-                                ));
+                                return Err(EvalError::ArithmError(self.eval_err_str("div by 0")));
                             }
                             let res = a % b;
                             stack.push(Value::Number(res));
@@ -679,9 +1169,9 @@ impl Vm {
                         let instance = unsafe { &mut *p_instance };
                         let protocol_func_name = self.string_pool.creat_istring("__not__");
                         if let Some(_v) = instance.fields.get(&protocol_func_name) {
-                            return Err(EvalError::CallError(self.eval_err_str(
-                                "`not` operation defined as field of Instance",
-                            )));
+                            return Err(EvalError::CallError(
+                                self.eval_err_str("`not` operation defined as field of Instance"),
+                            ));
                         } else {
                             if let Some(method) =
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
@@ -717,39 +1207,13 @@ impl Vm {
                 self.pc_add();
             }
             Instr::ClassIs => {
-                if let ValueKind::Klass(klass) = stack.pop().unwrap().kind() {
-                    if let ValueKind::Instance(instance) = stack.pop().unwrap().kind() {
-                        unsafe {
-                            let mut p_klass = (*instance).klass;
-                            let mut is_class = false;
-                            while p_klass != null_mut() {
-                                if p_klass == klass {
-                                    is_class = true;
-                                    break;
-                                }
-                                p_klass = (*p_klass).super_klass;
-                            }
-                            stack.push(Value::Bool(is_class));
-                        }
-                    } else {
-                        stack.push(Value::Bool(false));
-                    }
-                    self.pc_add();
-                } else {
-                    return Err(EvalError::TypeError(
-                        self.eval_err_str("`is` can ONLY check classes, r-hand must be Class"),
-                    ));
-                }
+                self.class_is(None)?;
             }
             Instr::MakeRange => {
-                let (opr1, opr2) = self.stack_get_number()?;
-                stack.push(Value::Range(opr1, opr2));
-                self.pc_add();
+                self.make_range(false, None)?;
             }
             Instr::MakeRangeClosed => {
-                let (opr1, opr2) = self.stack_get_number()?;
-                stack.push(Value::Range(opr1, opr2 + 1.));
-                self.pc_add();
+                self.make_range(true, None)?;
             }
             Instr::PushNil => {
                 stack.push(Value::Nil);
@@ -775,52 +1239,7 @@ impl Vm {
                 self.pc_add();
             }
             Instr::LoadChunk(x) => {
-                let chunk = self.get_chunk(x) as *const Chunk;
-                let mut upvalues = Vec::new();
-
-                for upval_decl in unsafe { &*chunk }.upvalues.iter() {
-                    match upval_decl {
-                        UpValueDecl::Ref(idx, _) => {
-                            let current_frame_bottom = call_frame.bottom;
-                            if let Some(x) =
-                                self.upvalues.iter().position(|p| match unsafe { &**p } {
-                                    UpValueObject {
-                                        marked: _,
-                                        value: UpValue::Ref(idx2),
-                                    } => *idx2 == (*idx) + current_frame_bottom,
-                                    _ => false,
-                                })
-                            {
-                                upvalues.push(self.upvalues[x]);
-                            } else {
-                                let upv =
-                                    self.new_upvalue_object((*idx) + current_frame_bottom);
-                                upvalues.push(upv);
-                            }
-                        }
-                        UpValueDecl::RefUpValue(idx, _) => {
-                            let current_closure = unsafe { &*call_frame.closure };
-                            let upv = current_closure.upvalues[*idx];
-                            upvalues.push(upv);
-                        }
-                    }
-                }
-                // copy current this_ref to loaded closure
-                // for cases when lambda or functions are defined inside methods.
-                let cur_this_ref = call_frame
-                    .bound_this
-                    .or(unsafe { (*closure).this_ref });
-                let closure = Closure {
-                    marked: false,
-                    chunk,
-                    upvalues,
-                    this_ref: cur_this_ref,
-                };
-                let mut boxed_closure = Box::new(closure);
-                let pointer = boxed_closure.as_mut() as *mut Closure;
-                self.objects.push(boxed_closure);
-                stack.push(Value::Closure(pointer));
-                self.pc_add();
+                self.load_chunk(x, None)?;
             }
             Instr::Load(x) => {
                 let v = self.get_constant(x);
@@ -829,27 +1248,14 @@ impl Vm {
                 self.pc_add();
             }
             Instr::GetGlobal(x) => {
-                let call_frame = call_frame;
-                let idx = unsafe { (&*(&*call_frame.closure).chunk).constants[x].clone() };
-                if let ValueKind::String(idx) = idx.kind() {
-                    // dbg!(&idx);
-                    let val = self.global.last().unwrap()[&idx].clone();
-                    stack.push(val);
-                    self.pc_add();
-                } else {
-                    unreachable!();
-                }
+                let value = self.get_global_value(x);
+                stack.push(value);
+                self.pc_add();
             }
             Instr::SetGlobal(x) => {
-                let call_frame = call_frame;
-                let idx = unsafe { (&*(&*call_frame.closure).chunk).constants[x].clone() };
-                let v = stack.pop().unwrap();
-                if let ValueKind::String(idx) = idx.kind() {
-                    self.global.last_mut().unwrap().insert(idx, v);
-                    self.pc_add();
-                } else {
-                    unreachable!();
-                }
+                let value = stack.pop().unwrap();
+                self.set_global_value(x, value);
+                self.pc_add();
             }
             Instr::GetLocal(x) => {
                 let callframe = call_frame;
@@ -876,34 +1282,28 @@ impl Vm {
                 self.pc_add();
             }
             Instr::InitArray(n) => {
-                self.run_gc()?;
-                let p_array = self.new_array(n);
-                stack.push(Value::Array(p_array));
-                self.pc_add();
+                self.init_array(n, None)?;
             }
             Instr::InitDict(n) => {
-                self.run_gc()?;
-                let p_dict = self.new_dict(n);
-                stack.push(Value::Dictionary(p_dict));
-                self.pc_add();
+                self.init_dict(n, None)?;
             }
             Instr::GetCollection => {
-                self.exec_get_collection()?;
+                self.exec_get_collection(None)?;
             }
             Instr::GetProperty => {
-                self.exec_get_property()?;
+                self.exec_get_property(None)?;
             }
             Instr::InvokeProperty(argc) => {
-                self.exec_invoke_property(argc)?;
+                self.exec_invoke_property(argc, None)?;
             }
             Instr::InvokeSuper(argc) => {
-                self.exec_invoke_super(argc)?;
+                self.exec_invoke_super(argc, None)?;
             }
             Instr::SetCollection => {
-                self.exec_set_collection()?;
+                self.exec_set_collection(None)?;
             }
             Instr::SetProperty => {
-                self.exec_set_property()?;
+                self.exec_set_property(None)?;
             }
             Instr::Jump(x) => {
                 let last_pc = call_frame.pc as i32;
@@ -932,396 +1332,41 @@ impl Vm {
             }
 
             Instr::Iterator => {
-                match stack.pop().unwrap().kind() {
-                    ValueKind::Range(l, r) => {
-                        let v = Value::Range(l, r);
-                        stack.push(v);
-                        self.pc_add();
-                    }
-                    ValueKind::String(istring) => {
-                        let v = Value::StringIter(istring.clone(), 0);
-                        stack.push(v);
-                        self.pc_add();
-                    }
-                    ValueKind::Array(array) => {
-                        let v = Value::ArrayIter(array, 0);
-                        stack.push(v);
-                        self.pc_add();
-                    }
-                    ValueKind::Dictionary(dict) => unsafe {
-                        // [[k,v], [k,v], [k,v],...]
-                        let kv_arr = (*dict)
-                            .dict
-                            .iter()
-                            .map(|(k, v)| {
-                                let entry = vec![Value::String(k.clone()), v.clone()];
-                                let mut b_entry = Box::new(Array {
-                                    marked: false,
-                                    array: entry,
-                                });
-                                let p_entry = b_entry.as_mut() as *mut Array;
-                                self.objects.push(b_entry);
-                                Value::Array(p_entry)
-                            })
-                            .collect();
-                        let mut b_array = Box::new(Array {
-                            marked: false,
-                            array: kv_arr,
-                        });
-                        let p_array = b_array.as_mut() as *mut Array;
-                        self.objects.push(b_array);
-                        let v = Value::ArrayIter(p_array, 0);
-                        stack.push(v);
-                        self.pc_add();
-                    },
-                    ValueKind::Instance(p_instance) => {
-                        let instance = unsafe { &mut *p_instance };
-                        let protocol_func_name = self.string_pool.creat_istring("__iter__");
-                        if let Some(v) = instance.fields.get(&protocol_func_name) {
-                            let v = v.clone();
-                            stack.push(v);
-                            self.pc_add();
-                        } else {
-                            if let Some(method) =
-                                unsafe { (*instance.klass).methods.get(&protocol_func_name) }
-                            {
-                                if let ValueKind::Closure(method) = method.kind() {
-                                    stack.push(Value::Closure(method));
-                                    self.call_top(0, Some(p_instance), false)?;
-                                } else {
-                                    unreachable!()
-                                }
-                            } else {
-                                return Err(EvalError::VariableNotFound(
-                                    self.eval_err_str("method not found"),
-                                ));
-                            }
-                        };
-                    }
-                    _ => {
-                        return Err(EvalError::TypeError(
-                            self.eval_err_str("not subscriptable"),
-                        ));
-                    }
-                };
+                self.make_iterator(None)?;
             }
 
             Instr::Next => {
-                let mut iterator = stack.pop().unwrap();
-                match iterator.kind() {
-                    ValueKind::Range(l, r) => {
-                        let v = if (l - r).abs() < f64::EPSILON {
-                            Value::Nil
-                        } else if l < r {
-                            let next = l + 1.;
-                            iterator = Value::Range(next, r);
-                            Value::Number(next - 1.)
-                        } else if l > r {
-                            let next = l - 1.;
-                            iterator = Value::Range(next, r);
-                            Value::Number(next + 1.)
-                        } else {
-                            unreachable!()
-                        };
-                        stack.push(iterator);
-                        stack.push(v);
-                        self.pc_add();
-                    }
-                    ValueKind::ArrayIter(arr, i) => unsafe {
-                        if i >= (*arr).array.len() {
-                            stack.push(iterator);
-                            stack.push(Value::Nil);
-                            self.pc_add();
-                        } else {
-                            let v = (&mut *arr).array[i].clone();
-                            iterator = Value::ArrayIter(arr, i + 1);
-                            stack.push(iterator);
-                            stack.push(v);
-                            self.pc_add();
-                        }
-                    },
-                    ValueKind::StringIter(s, i) => {
-                        // performance?
-                        let c = s.get_inner().chars().skip(i).next();
-                        if let Some(c) = c {
-                            let next = format!("{c}");
-                            iterator = Value::StringIter(s, i + 1);
-                            stack.push(iterator);
-                            stack.push(Value::String(
-                                self.string_pool.creat_istring(&next),
-                            ));
-                            self.pc_add();
-                        } else {
-                            stack.push(iterator);
-                            stack.push(Value::Nil);
-                            self.pc_add();
-                        }
-                    }
-                    ValueKind::Instance(p_instance) => {
-                        // The iterator object stays below the value/call
-                        // frame and is advanced in place by `__next__`.
-                        stack.push(iterator);
-                        let instance = unsafe { &mut *p_instance };
-                        let protocol_func_name =
-                            self.string_pool.creat_istring("__next__");
-                        if let Some(v) = instance.fields.get(&protocol_func_name) {
-                            let v = v.clone();
-                            stack.push(v);
-                            self.pc_add();
-                        } else {
-                            if let Some(method) =
-                                unsafe { (*instance.klass).methods.get(&protocol_func_name) }
-                            {
-                                if let ValueKind::Closure(method) = method.kind() {
-                                    stack.push(Value::Closure(method));
-                                    self.call_top(0, Some(p_instance), false)?;
-                                } else {
-                                    unreachable!()
-                                }
-                            } else {
-                                return Err(EvalError::VariableNotFound(
-                                    self.eval_err_str("method not found"),
-                                ));
-                            }
-                        };
-                    }
-                    _ => {
-                        return Err(EvalError::VariableNotFound(
-                            self.eval_err_str("not a Iterator Object"),
-                        ));
-                    }
-                }
+                self.iterator_next(None)?;
             }
             Instr::Call(x) => {
-                let callee = stack[stack.len() - x - 1].kind();
-                match callee {
-                    ValueKind::Closure(_) | ValueKind::NativeFunction(_) => {
-                        self.call_top(x, None, false)?;
-                    }
-                    ValueKind::Klass(klass) => {
-                        let class_idx = stack.len() - x - 1;
-
-                        let mut b_instace = Box::new(Instance {
-                            marked: false,
-                            klass,
-                            fields: HashMap::new(),
-                        });
-                        let p_instance = b_instace.as_mut() as *mut Instance;
-                        self.objects.push(b_instace);
-                        let idx = self.string_pool.creat_istring("__init__");
-                        if let Some(method) = unsafe { (*klass).methods.get(&idx) } {
-                            if let ValueKind::Closure(method) = method.kind() {
-                                // Call `__init__` directly with the new instance
-                                // bound as `this`, without cloning the closure.
-                                stack[class_idx] = Value::Closure(method);
-                                self.call_top(x, Some(p_instance), false)?;
-                            } else {
-                                unreachable!()
-                            }
-                        } else {
-                            // no __init__() definded
-                            for _ in 0..x {
-                                stack.pop();
-                            }
-                            stack.pop();
-                            stack.push(Value::Instance(p_instance));
-                            self.pc_add();
-                        }
-                    }
-                    _ => {
-                        return Err(EvalError::CallError(
-                            self.eval_err_str("calling object which is not Callable"),
-                        ));
-                    }
-                }
+                self.call_value(x, None)?;
             }
 
             Instr::Return => {
-                let callframe = unsafe { (*self.executing_fiber).call_frames.pop().unwrap() };
-                self.bump_frame_epoch();
-                let chunk = unsafe { &*(*callframe.closure).chunk };
-                let mut new_upvalues = Vec::new();
-                for upv in self.upvalues.iter_mut() {
-                    let mut escape = false;
-                    let mut idx = 0;
-                    if let UpValue::Ref(x) = unsafe { &(**upv).value } {
-                        if *x >= callframe.bottom {
-                            escape = true;
-                            idx = *x;
-                        }
-                    }
-                    if escape {
-                        unsafe {
-                            (**upv).value = UpValue::Closed(stack[idx].clone());
-                        }
-                    } else {
-                        new_upvalues.push(*upv);
-                    }
-                }
-                self.upvalues = new_upvalues;
-
-                if callframe.bottom + chunk.num_locals == stack.len() {
-                    for _ in callframe.bottom..stack.len() {
-                        stack.pop();
-                    }
-                    stack.pop(); //pop closure
-                    if !call_frame.discard_return_value {
-                        stack.push(Value::Nil); // functions always return exactly ONE value, unless SetCollection
-                    }
-                } else {
-                    let val = stack.pop().unwrap(); // closure ret_vall <- get it
-                    for _ in callframe.bottom..stack.len() {
-                        stack.pop();
-                    }
-                    stack.pop(); // pop closure
-                    if !call_frame.discard_return_value {
-                        stack.push(val); // push return value
-                    }
-                }
-                unsafe {
-                    if (*self.executing_fiber).call_frames.is_empty() {
-                        let ret_from = self.executing_fiber;
-                        let prev = (*self.executing_fiber).prev;
-                        if prev != null_mut() {
-                            // back to prev fiber
-                            self.executing_fiber = prev;
-                            self.bump_frame_epoch();
-                            if (*ret_from).state == FiberState::Loader {
-                                // the instruction lead to fiber transfering should be skipped
-                                self.pc_add();
-                                let module_namespace = self.global.pop().unwrap();
-                                let mut b_module_namespace_dict = Box::new(Dict {
-                                    marked: false,
-                                    dict: module_namespace,
-                                });
-                                let p_module_namespace_dict =
-                                    b_module_namespace_dict.as_mut() as *mut Dict;
-                                self.objects.push(b_module_namespace_dict);
-                                self.get_stack()
-                                    .push(Value::Dictionary(p_module_namespace_dict));
-                            } else {
-                                (*ret_from).state = FiberState::Finished;
-                                (*prev).state = FiberState::Running;
-                                self.get_stack().push(Value::Nil);
-                            }
-                        } else {
-                            return Ok(Step::Finished);
-                        }
-                    }
-                }
+                return self.do_return();
             }
             Instr::GetSuperMethod => {
-                let idx = stack.pop().unwrap();
-                let clct = stack.pop().unwrap();
-                if let ValueKind::Instance(p_instance) = clct.kind() {
-                    if let ValueKind::String(i) = idx.kind() {
-                        let instance = unsafe { &mut *p_instance };
-                        let mut super_class = unsafe { (*instance.klass).super_klass };
-                        let mut ok = false;
-                        while super_class != ptr::null_mut() {
-                            if let Some(method) = unsafe { (*super_class).methods.get(&i) } {
-                                if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    stack.push(Value::Closure(p_binded_closure));
-                                    self.pc_add();
-                                    ok = true;
-                                    break;
-                                } else {
-                                    super_class = unsafe { (*super_class).super_klass };
-                                }
-                            }
-                        }
-                        if !ok {
-                            return Err(EvalError::VariableNotFound(
-                                self.eval_err_str("method not found"),
-                            ));
-                        }
-                    } else {
-                        return Err(EvalError::TypeError(
-                            self.eval_err_str("Instance can only be indexed by String"),
-                        ));
-                    }
-                } else {
-                    unreachable!()
-                }
+                self.get_super_method(None)?;
             }
             Instr::InitClass => {
-                let mut b_class = Box::new(Klass {
-                    marked: false,
-                    super_klass: null_mut(),
-                    methods: HashMap::new(),
-                });
-                let p_class = b_class.as_mut() as *mut Klass;
-                self.objects.push(b_class);
-                stack.push(Value::Klass(p_class));
-                self.pc_add();
+                self.init_class(None);
             }
             Instr::ClassExtend => {
-                let super_klass = stack.pop().unwrap();
-                let klass = stack.pop().unwrap();
-                if let ValueKind::Klass(klass) = klass.kind() {
-                    if let ValueKind::Klass(super_klass) = super_klass.kind() {
-                        unsafe {
-                            (*klass).super_klass = super_klass;
-                            // copy down methods
-                            for (name, closure) in &(*super_klass).methods {
-                                (*klass).methods.insert(name.clone(), closure.clone());
-                            }
-                        }
-                        stack.push(Value::Klass(klass));
-                        self.pc_add();
-                    } else {
-                        return Err(EvalError::TypeError(
-                            self.eval_err_str("Class can only extend Class"),
-                        ));
-                    }
-                } else {
-                    unreachable!()
-                }
+                self.class_extend(None)?;
             }
             Instr::AddMethod => {
-                let method = stack.pop().unwrap();
-                let name = stack.pop().unwrap();
-                let klass = stack.pop().unwrap();
-                if let ValueKind::Klass(klass) = klass.kind() {
-                    if let ValueKind::String(name) = name.kind() {
-                        if let ValueKind::Closure(method) = method.kind() {
-                            unsafe {
-                                (*klass).methods.insert(name, Value::Closure(method));
-                            }
-                        } else {
-                            unreachable!()
-                        }
-                        stack.push(Value::Klass(klass));
-                        self.pc_add();
-                    } else {
-                        unreachable!()
-                    }
-                } else {
-                    unreachable!()
-                }
+                self.add_method(None)?;
             }
             Instr::GetThis => {
-                let t = call_frame
-                    .bound_this
-                    .or(unsafe { (*closure).this_ref })
-                    .unwrap();
-                stack.push(Value::Instance(t));
+                let value = self.get_this_value();
+                stack.push(value);
                 self.pc_add();
             }
             Instr::Nop => {
                 self.pc_add();
             }
             Instr::UnpackVA => {
-                for elem in call_frame.va_args.iter() {
-                    stack.push(elem.clone());
-                }
-                self.pc_add();
+                self.unpack_va(None);
             }
             i => {
                 return Err(EvalError::Error(
@@ -1331,7 +1376,6 @@ impl Vm {
         }
         Ok(Step::Continue)
     }
-
 
     fn binary_predicate_impl(
         &mut self,
@@ -1399,7 +1443,7 @@ impl Vm {
         Ok(())
     }
     /// `collection[index]`
-    fn exec_get_collection(&mut self) -> EvalResult {
+    pub fn exec_get_collection(&mut self, next_pc: Option<usize>) -> EvalResult {
         let stack = unsafe { &mut (*self.executing_fiber).stack };
         let idx = stack.pop().unwrap();
         let clct = stack.pop().unwrap();
@@ -1407,9 +1451,9 @@ impl Vm {
             ValueKind::Array(p_array) => {
                 if let ValueKind::Number(i) = idx.kind() {
                     if i < 0. {
-                        return Err(EvalError::IndexOutOfBound(self.eval_err_str(
-                            "Array cannot be indexed by negative value",
-                        )));
+                        return Err(EvalError::IndexOutOfBound(
+                            self.eval_err_str("Array cannot be indexed by negative value"),
+                        ));
                     }
                     let i = i as usize;
                     let arr = unsafe { &mut *p_array };
@@ -1420,7 +1464,7 @@ impl Vm {
                     } else {
                         let elem = arr.array.get(i).unwrap().clone();
                         stack.push(elem);
-                        self.pc_add();
+                        self.advance_pc(next_pc);
                     }
                 } else {
                     return Err(EvalError::TypeError(
@@ -1433,7 +1477,7 @@ impl Vm {
                     let m = unsafe { &mut *p_dict };
                     if let Some(v) = m.dict.get(&s) {
                         stack.push(v.clone());
-                        self.pc_add();
+                        self.advance_pc(next_pc);
                     } else {
                         return Err(EvalError::KeyError(
                             self.eval_err_str("unknown key to module"),
@@ -1447,11 +1491,12 @@ impl Vm {
             }
             ValueKind::Instance(p_instance) => {
                 let protocol_name = self.string_pool.creat_istring("__index__");
-                if let Some(method) = unsafe { (*(*p_instance).klass).methods.get(&protocol_name) } {
+                if let Some(method) = unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
+                {
                     if let ValueKind::Closure(method) = method.kind() {
                         stack.push(Value::Closure(method));
                         stack.push(idx);
-                        self.call_top(1, Some(p_instance), false)?;
+                        self.call_top_at(1, Some(p_instance), false, next_pc)?;
                     } else {
                         unreachable!()
                     }
@@ -1466,7 +1511,7 @@ impl Vm {
                     let m = unsafe { &mut *p_module };
                     if let Some(v) = m.dict.get(&s) {
                         stack.push(v.clone());
-                        self.pc_add();
+                        self.advance_pc(next_pc);
                     } else {
                         return Err(EvalError::KeyError(
                             self.eval_err_str("unknown key to module"),
@@ -1488,7 +1533,7 @@ impl Vm {
     }
 
     /// `collection.property`
-    fn exec_get_property(&mut self) -> EvalResult {
+    pub fn exec_get_property(&mut self, next_pc: Option<usize>) -> EvalResult {
         let stack = unsafe { &mut (*self.executing_fiber).stack };
         let idx = stack.pop().unwrap();
         let clct = stack.pop().unwrap();
@@ -1500,7 +1545,7 @@ impl Vm {
                     let ext_name = self.get_builtin_type_extension_name("Array", s.get_inner());
                     let ext_method = self.global.last().unwrap()[&ext_name].clone();
                     stack.push(ext_method);
-                    self.pc_add();
+                    self.advance_pc(next_pc);
                 } else {
                     return Err(EvalError::TypeError(self.eval_err_str(
                         "Array. syntax is used to call extension methods on it.",
@@ -1512,7 +1557,7 @@ impl Vm {
                     let m = unsafe { &mut *p_dict };
                     if let Some(v) = m.dict.get(&s) {
                         stack.push(v.clone());
-                        self.pc_add();
+                        self.advance_pc(next_pc);
                     } else {
                         return Err(EvalError::KeyError(
                             self.eval_err_str("unknown key to module"),
@@ -1529,7 +1574,7 @@ impl Vm {
                     let instance = unsafe { &mut *p_instance };
                     if let Some(v) = instance.fields.get(&i) {
                         stack.push(v.clone());
-                        self.pc_add();
+                        self.advance_pc(next_pc);
                     } else if let Some(method) = unsafe { (*instance.klass).methods.get(&i) } {
                         if let ValueKind::Closure(method) = method.kind() {
                             let mut binded_closure = unsafe { (*method).clone() };
@@ -1539,7 +1584,7 @@ impl Vm {
                             self.objects.push(b_binded_closure);
                             let v = Value::Closure(p_binded_closure);
                             stack.push(v);
-                            self.pc_add();
+                            self.advance_pc(next_pc);
                         } else {
                             unreachable!()
                         }
@@ -1559,7 +1604,7 @@ impl Vm {
                     let m = unsafe { &mut *p_module };
                     if let Some(v) = m.dict.get(&s) {
                         stack.push(v.clone());
-                        self.pc_add();
+                        self.advance_pc(next_pc);
                     } else {
                         return Err(EvalError::KeyError(
                             self.eval_err_str("unknown key to module"),
@@ -1589,7 +1634,7 @@ impl Vm {
     /// Instance methods are called through the original closure stored in the
     /// class method table.  The receiver is carried by
     /// [`CallFrame::bound_this`] instead of allocating a bound closure.
-    fn exec_invoke_property(&mut self, argc: usize) -> EvalResult {
+    pub fn exec_invoke_property(&mut self, argc: usize, next_pc: Option<usize>) -> EvalResult {
         let stack = unsafe { &mut (*self.executing_fiber).stack };
         let recv_idx = stack.len() - argc - 2;
         let name = match stack[recv_idx + 1].kind() {
@@ -1610,12 +1655,12 @@ impl Vm {
                     let v = v.clone();
                     stack[recv_idx] = v;
                     stack.remove(recv_idx + 1);
-                    self.call_top(argc, None, false)?;
+                    self.call_top_at(argc, None, false, next_pc)?;
                 } else if let Some(method) = unsafe { (*instance.klass).methods.get(&name) } {
                     if let ValueKind::Closure(method) = method.kind() {
                         stack[recv_idx] = Value::Closure(method);
                         stack.remove(recv_idx + 1);
-                        self.call_top(argc, Some(p_instance), false)?;
+                        self.call_top_at(argc, Some(p_instance), false, next_pc)?;
                     } else {
                         unreachable!()
                     }
@@ -1629,11 +1674,10 @@ impl Vm {
                 // Extension methods are native functions that expect the
                 // receiver directly below the callee, so keep both slots.
                 stack[recv_idx + 1] = {
-                    let ext_name =
-                        self.get_builtin_type_extension_name("Array", name.get_inner());
+                    let ext_name = self.get_builtin_type_extension_name("Array", name.get_inner());
                     self.global.last().unwrap()[&ext_name].clone()
                 };
-                self.call_top(argc, None, false)?;
+                self.call_top_at(argc, None, false, next_pc)?;
             }
             ValueKind::Dictionary(p_dict) | ValueKind::Module(p_dict) => {
                 let m = unsafe { &mut *p_dict };
@@ -1647,7 +1691,7 @@ impl Vm {
                 };
                 stack[recv_idx] = v;
                 stack.remove(recv_idx + 1);
-                self.call_top(argc, None, false)?;
+                self.call_top_at(argc, None, false, next_pc)?;
             }
             v => {
                 return Err(EvalError::TypeError(
@@ -1659,7 +1703,7 @@ impl Vm {
     }
 
     /// `collection[index] = value`
-    fn exec_set_collection(&mut self) -> EvalResult {
+    pub fn exec_set_collection(&mut self, next_pc: Option<usize>) -> EvalResult {
         let stack = unsafe { &mut (*self.executing_fiber).stack };
         let val = stack.pop().unwrap();
         let idx = stack.pop().unwrap();
@@ -1668,9 +1712,9 @@ impl Vm {
             ValueKind::Array(p_array) => {
                 if let ValueKind::Number(i) = idx.kind() {
                     if i < 0. {
-                        return Err(EvalError::IndexOutOfBound(self.eval_err_str(
-                            "Array cannot be indexed by negative value",
-                        )));
+                        return Err(EvalError::IndexOutOfBound(
+                            self.eval_err_str("Array cannot be indexed by negative value"),
+                        ));
                     }
                     let i = i as usize;
                     let arr = unsafe { &mut *p_array };
@@ -1686,7 +1730,7 @@ impl Vm {
                         self.eval_err_str("Array can only be indexed by Number"),
                     ));
                 }
-                self.pc_add();
+                self.advance_pc(next_pc);
             }
             ValueKind::Dictionary(p_dict) => {
                 if let ValueKind::String(i) = idx.kind() {
@@ -1701,19 +1745,18 @@ impl Vm {
                         self.eval_err_str("Dict can only be indexed by String"),
                     ));
                 }
-                self.pc_add();
+                self.advance_pc(next_pc);
             }
             ValueKind::Instance(p_instance) => {
                 // this.__assign__(idx, val)
                 let protocol_name = self.string_pool.creat_istring("__assign__");
-                if let Some(method) =
-                    unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
+                if let Some(method) = unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
                 {
                     if let ValueKind::Closure(method) = method.kind() {
                         stack.push(Value::Closure(method));
                         stack.push(idx);
                         stack.push(val);
-                        self.call_top(2, Some(p_instance), true)?;
+                        self.call_top_at(2, Some(p_instance), true, next_pc)?;
                     } else {
                         unreachable!()
                     }
@@ -1733,7 +1776,7 @@ impl Vm {
     }
 
     /// `collection.property = value`
-    fn exec_set_property(&mut self) -> EvalResult {
+    pub fn exec_set_property(&mut self, next_pc: Option<usize>) -> EvalResult {
         let stack = unsafe { &mut (*self.executing_fiber).stack };
         let val = stack.pop().unwrap();
         let idx = stack.pop().unwrap();
@@ -1752,7 +1795,7 @@ impl Vm {
                         self.eval_err_str("Dict can only be indexed by String"),
                     ));
                 }
-                self.pc_add();
+                self.advance_pc(next_pc);
             }
             ValueKind::Instance(p_instance) => {
                 if let ValueKind::String(i) = idx.kind() {
@@ -1762,7 +1805,7 @@ impl Vm {
                         self.eval_err_str("Instance can only be indexed by String"),
                     ));
                 }
-                self.pc_add();
+                self.advance_pc(next_pc);
             }
             v => {
                 return Err(EvalError::TypeError(self.eval_err_str(
@@ -1777,7 +1820,7 @@ impl Vm {
     ///
     /// Like [`Vm::exec_invoke_property`], but the method lookup starts at the
     /// receiver's superclass.
-    fn exec_invoke_super(&mut self, argc: usize) -> EvalResult {
+    pub fn exec_invoke_super(&mut self, argc: usize, next_pc: Option<usize>) -> EvalResult {
         let stack = unsafe { &mut (*self.executing_fiber).stack };
         let recv_idx = stack.len() - argc - 2;
         let name = match stack[recv_idx + 1].kind() {
@@ -1800,7 +1843,7 @@ impl Vm {
                 if let ValueKind::Closure(method) = method.kind() {
                     stack[recv_idx] = Value::Closure(method);
                     stack.remove(recv_idx + 1);
-                    self.call_top(argc, Some(p_instance), false)?;
+                    self.call_top_at(argc, Some(p_instance), false, next_pc)?;
                     return Ok(());
                 }
             }
@@ -1809,6 +1852,19 @@ impl Vm {
         Err(EvalError::VariableNotFound(
             self.eval_err_str("method not found"),
         ))
+    }
+
+    /// Advance the current frame's program counter.
+    ///
+    /// `next_pc` is supplied by the AOT backend, which already knows the next
+    /// instruction offset.  The interpreter passes `None` and decodes the
+    /// current instruction to find its length.
+    #[inline]
+    fn advance_pc(&mut self, next_pc: Option<usize>) {
+        match next_pc {
+            Some(pc) => self.set_pc(pc),
+            None => self.pc_add(),
+        }
     }
 
     /// Call the value at `stack.len() - arg_cnt - 1`.
@@ -1821,6 +1877,19 @@ impl Vm {
         arg_cnt: usize,
         bound_this: Option<*mut Instance>,
         discard_return_value: bool,
+    ) -> Result<(), EvalError> {
+        self.call_top_at(arg_cnt, bound_this, discard_return_value, None)
+    }
+
+    /// Shared implementation of `call_top` for the interpreter and the AOT
+    /// runtime.  The caller frame is advanced before a new frame is pushed, so
+    /// the interpreter and AOT agree on where execution resumes.
+    fn call_top_at(
+        &mut self,
+        arg_cnt: usize,
+        bound_this: Option<*mut Instance>,
+        discard_return_value: bool,
+        next_pc: Option<usize>,
     ) -> Result<(), EvalError> {
         let x = arg_cnt;
         let stack = self.get_stack();
@@ -1837,24 +1906,20 @@ impl Vm {
                     } else {
                         return Err(EvalError::CallError(
                             self.eval_err_str(
-                                format!(
-                                    "wrong number of argument {x}/{}",
-                                    chunk.parameter_num
-                                )
-                                .as_ref(),
+                                format!("wrong number of argument {x}/{}", chunk.parameter_num)
+                                    .as_ref(),
                             ),
                         ));
                     }
                 }
-                let mut call_frame =
-                    CallFrame::new(stack.len() - x, p_closure, packed_va_list);
+                let mut call_frame = CallFrame::new(stack.len() - x, p_closure, packed_va_list);
                 call_frame.bound_this = bound_this;
                 call_frame.discard_return_value = discard_return_value;
                 // va_list arg should be pop
                 for _ in 0..x - chunk.parameter_num {
                     stack.pop();
                 }
-                self.pc_add();
+                self.advance_pc(next_pc);
                 self.reserve_local(chunk.num_locals - chunk.parameter_num);
                 unsafe {
                     (*self.executing_fiber).call_frames.push(call_frame);
@@ -1862,13 +1927,11 @@ impl Vm {
                 self.bump_frame_epoch();
             }
             ValueKind::NativeFunction(f) => {
+                // Advance before running the native function so that a fiber
+                // switch leaves this frame at the instruction after the call.
+                self.advance_pc(next_pc);
                 let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
                 f(self, x);
-                if self.fiber_changed {
-                    self.fiber_changed = false;
-                } else {
-                    self.pc_add();
-                }
             }
             _ => {
                 return Err(EvalError::CallError(
@@ -1983,7 +2046,7 @@ impl Vm {
         &chunk.chunks[idx]
     }
     #[inline]
-    fn get_upvalue(&mut self, idx: usize) -> Value {
+    pub fn get_upvalue(&mut self, idx: usize) -> Value {
         let callframe = self.get_call_frame();
         let closure = unsafe { &mut *callframe.closure };
         let upv_obj = closure.upvalues[idx];
@@ -1994,7 +2057,7 @@ impl Vm {
         }
     }
     #[inline]
-    fn set_upvalue(&mut self, idx: usize, v: Value) {
+    pub fn set_upvalue(&mut self, idx: usize, v: Value) {
         let callframe = self.get_call_frame();
         let closure = unsafe { &mut *callframe.closure };
         let upv_obj = closure.upvalues[idx];
