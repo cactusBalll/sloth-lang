@@ -586,6 +586,8 @@ fn opcode_operand(instr: &Instr) -> (u8, i64) {
         PushNil => (OpCode::PushNil as u8, 0),
         GetCollection => (OpCode::GetCollection as u8, 0),
         GetProperty => (OpCode::GetProperty as u8, 0),
+        InvokeProperty(v) => (OpCode::InvokeProperty as u8, x(*v)),
+        InvokeSuper(v) => (OpCode::InvokeSuper as u8, x(*v)),
         SetCollection(v) => (OpCode::SetCollection as u8, x(*v)),
         Add => (OpCode::Add as u8, 0),
         Sub => (OpCode::Sub as u8, 0),

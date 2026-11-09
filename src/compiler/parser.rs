@@ -734,6 +734,7 @@ impl<'a> ParserCtx<'a> {
             }
             self.advance();
             let mut is_assign = true;
+            let mut method_invoked = false;
             while let Some(tk) = self.peek() {
                 if tk.is_assign() {
                     break;
@@ -753,14 +754,22 @@ impl<'a> ParserCtx<'a> {
                     } else {
                         return Err(self.parser_err_str("invalid rval expr"));
                     }
-                    self.emit_with_line(Instr::GetProperty, line);
+                    if self.peek() == Some(Token::LParen) {
+                        self.advance();
+                        let arg_num = self.parse_argument()?;
+                        self.consume(Token::RParen)?;
+                        self.emit_with_line(Instr::InvokeProperty(arg_num), line);
+                        method_invoked = true;
+                    } else {
+                        self.emit_with_line(Instr::GetProperty, line);
+                    }
                     continue;
                 } else {
                     is_assign = false;
                     break;
                 }
             }
-            if is_assign {
+            if is_assign && !method_invoked {
                 // consume '='
                 self.advance();
                 // change get operation to corresponging set operation
@@ -831,8 +840,16 @@ impl<'a> ParserCtx<'a> {
                     if let Token::Symbol(s) = self.peek_not_eof()? {
                         self.emit(Instr::GetThis);
                         self.load_value(Value::String(s));
-                        self.emit(Instr::GetSuperMethod);
                         self.advance();
+                        if self.peek() == Some(Token::LParen) {
+                            let line = self.get_line();
+                            self.advance();
+                            let arg_num = self.parse_argument()?;
+                            self.consume(Token::RParen)?;
+                            self.emit_with_line(Instr::InvokeSuper(arg_num), line);
+                        } else {
+                            self.emit(Instr::GetSuperMethod);
+                        }
                     } else {
                         return Err(self.parser_err_str("expect symbol after `super.`"));
                     }
@@ -965,7 +982,14 @@ impl<'a> ParserCtx<'a> {
                 } else {
                     return Err(self.parser_err_str("invalid rval expr"));
                 }
-                self.emit_with_line(Instr::GetProperty, line);
+                if self.peek() == Some(Token::LParen) {
+                    self.advance();
+                    let arg_num = self.parse_argument()?;
+                    self.consume(Token::RParen)?;
+                    self.emit_with_line(Instr::InvokeProperty(arg_num), line);
+                } else {
+                    self.emit_with_line(Instr::GetProperty, line);
+                }
                 continue;
             }
             let backpatch_point: usize = self.instrs[self.depth].len();

@@ -280,6 +280,11 @@ impl GCObject for Fiber {
             unsafe {
                 mark_gc_object(&mut *call_frame.closure);
             }
+            if let Some(this) = call_frame.bound_this {
+                unsafe {
+                    mark_gc_object(&mut *this);
+                }
+            }
             for val in call_frame.va_args.iter() {
                 mark_value(val);
             }
@@ -535,6 +540,87 @@ mod test {
         "#;
         let res = run_string(&src, false);
         println!("{res:?}");
+    }
+
+    #[test]
+    fn method_invoke_fast_path() {
+        let src = r#"
+            class Counter {
+                func __init__(start) {
+                    this.value = start;
+                }
+                func add(x) {
+                    this.value = this.value + x;
+                    return this.value;
+                }
+                func norm() {
+                    return this.value * 2;
+                }
+                func get() {
+                    return this.value;
+                }
+                func survive_gc() {
+                    var i = 0;
+                    while (i < 200) {
+                        var garbage = [i, [i, i]];
+                        i = i + 1;
+                    }
+                    return this.value;
+                }
+            }
+
+            class Holder {
+                func __init__() {
+                    this.x = 7;
+                    this.f = ||{ return this.x; };
+                }
+            }
+
+            var c = Counter(0);
+            var i = 0;
+            var acc = 0;
+            while (i < 5) {
+                c.add(i);
+                acc = acc + c.norm();
+                i = i + 1;
+            }
+            if (c.value != 10 or acc != 40) { var bad = [][0]; }
+
+            var add = c.add;
+            if (add(5) != 15) { var bad = [][0]; }
+            var get = c.get;
+            if (get() != 15) { var bad = [][0]; }
+
+            if (Counter(3).add(4) != 7) { var bad = [][0]; }
+            if (Counter(41).survive_gc() != 41) { var bad = [][0]; }
+            if (Holder().f() != 7) { var bad = [][0]; }
+
+            var arr = [1, 2];
+            arr.push(3);
+            if (arr[2] != 3 or arr.pop() != 3) { var bad = [][0]; }
+
+            if (math.floor(1.9) != 1) { var bad = [][0]; }
+
+            var d = @("f": ||{ return 3; });
+            if (d.f() != 3) { var bad = [][0]; }
+
+            class Base {
+                func __init__() { this.v = 3; }
+                func value() { return this.v; }
+            }
+            class Derived:Base {
+                func __init__() {
+                    super.__init__();
+                    this.v = this.v + 4;
+                }
+                func value() {
+                    return super.value() * 2;
+                }
+            }
+            if (Derived().value() != 14) { var bad = [][0]; }
+        "#;
+        let res = run_string(&src, false);
+        assert!(res.is_ok(), "{res:?}");
     }
     #[test]
     fn loop1() {

@@ -82,3 +82,32 @@ fn gc_keeps_variadic_arguments() {
     let res = run_string(src, false);
     assert!(res.is_ok(), "{res:?}");
 }
+
+/// A receiver bound by the direct method-call fast path is not on the operand
+/// stack, so `CallFrame::bound_this` must be treated as a GC root.
+#[test]
+fn gc_keeps_bound_this_receiver() {
+    let src = r#"
+        class Counter {
+            func __init__(v) {
+                this.v = v;
+            }
+            func value() {
+                var i = 0;
+                while (i < 400) {
+                    var garbage = [i, [i, i]];
+                    i = i + 1;
+                }
+                return this.v;
+            }
+        }
+
+        var result = Counter(41).value();
+        print(result);
+        if (result != 41) {
+            var bad = [][0];
+        }
+    "#;
+    let res = run_string(src, false);
+    assert!(res.is_ok(), "{res:?}");
+}

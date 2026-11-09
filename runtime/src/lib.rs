@@ -72,6 +72,8 @@ fn instr_from_opcode(op: u32, operand: i64) -> Option<Instr> {
         PushNil => Instr::PushNil,
         GetCollection => Instr::GetCollection,
         GetProperty => Instr::GetProperty,
+        InvokeProperty => Instr::InvokeProperty(x),
+        InvokeSuper => Instr::InvokeSuper(x),
         SetCollection => Instr::SetCollection(x),
         Add => Instr::Add,
         Sub => Instr::Sub,

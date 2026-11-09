@@ -78,6 +78,8 @@ pub enum OpCode {
 
     UnpackVA = 50,
     GetProperty = 51,
+    InvokeProperty = 52,
+    InvokeSuper = 53,
 }
 
 impl OpCode {
@@ -143,6 +145,8 @@ impl OpCode {
 
             50 => UnpackVA,
             51 => GetProperty,
+            52 => InvokeProperty,
+            53 => InvokeSuper,
             _ => return None,
         })
     }
@@ -169,6 +173,17 @@ pub enum Instr {
     GetCollection,
     /// `collection.property`
     GetProperty,
+    /// `receiver.property(arg0, ..., argN-1)`
+    ///
+    /// Fuses `GetProperty` with the immediately following `Call`.  The name is
+    /// already on the stack below the arguments; the operand is the argument
+    /// count.
+    InvokeProperty(usize),
+    /// `super.property(arg0, ..., argN-1)`
+    ///
+    /// Like [`Instr::InvokeProperty`], but starts the method lookup at the
+    /// receiver's superclass.
+    InvokeSuper(usize),
     /// `collection[index] = value` / `collection.property = value`
     /// 0 - []
     /// 1 - .
@@ -293,7 +308,9 @@ fn instr_len(instr: &Instr) -> usize {
         | InitArray(x)
         | InitDict(x)
         | SetCollection(x)
-        | Call(x) => 1 + leb128_len(*x as u64),
+        | Call(x)
+        | InvokeProperty(x)
+        | InvokeSuper(x) => 1 + leb128_len(*x as u64),
     }
 }
 
@@ -379,6 +396,14 @@ fn encode_one(instr: &Instr, index: usize, offsets: &[usize], out: &mut Vec<u8>)
         PushNil => op(out, OpCode::PushNil),
         GetCollection => op(out, OpCode::GetCollection),
         GetProperty => op(out, OpCode::GetProperty),
+        InvokeProperty(x) => {
+            op(out, OpCode::InvokeProperty);
+            write_u64(out, *x as u64);
+        }
+        InvokeSuper(x) => {
+            op(out, OpCode::InvokeSuper);
+            write_u64(out, *x as u64);
+        }
         SetCollection(x) => {
             op(out, OpCode::SetCollection);
             write_u64(out, *x as u64);
@@ -470,6 +495,8 @@ pub fn decode_instr(code: &[u8], pc: usize) -> Result<(Instr, usize), u8> {
         OpCode::PushNil => PushNil,
         OpCode::GetCollection => GetCollection,
         OpCode::GetProperty => GetProperty,
+        OpCode::InvokeProperty => InvokeProperty(read_operand(code, operand_pc, pc)?),
+        OpCode::InvokeSuper => InvokeSuper(read_operand(code, operand_pc, pc)?),
         OpCode::SetCollection => SetCollection(read_operand(code, operand_pc, pc)?),
         OpCode::Add => Add,
         OpCode::Sub => Sub,
@@ -595,6 +622,28 @@ mod tests {
 
         let (third, third_len) = decode_instr(&code, first_len + second_len).unwrap();
         assert!(matches!(third, Instr::PushNil));
+        assert_eq!(third_len, 1);
+    }
+
+    #[test]
+    fn invoke_instructions_roundtrip() {
+        let instrs = vec![
+            Instr::InvokeProperty(1),
+            Instr::InvokeSuper(300),
+            Instr::Nop,
+        ];
+        let (code, _) = encode_instrs(&instrs, &[0; 3]);
+
+        let (first, first_len) = decode_instr(&code, 0).unwrap();
+        assert!(matches!(first, Instr::InvokeProperty(1)));
+        assert_eq!(first_len, 2);
+
+        let (second, second_len) = decode_instr(&code, first_len).unwrap();
+        assert!(matches!(second, Instr::InvokeSuper(300)));
+        assert_eq!(second_len, 3);
+
+        let (third, third_len) = decode_instr(&code, first_len + second_len).unwrap();
+        assert!(matches!(third, Instr::Nop));
         assert_eq!(third_len, 1);
     }
 

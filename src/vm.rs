@@ -88,6 +88,11 @@ pub struct CallFrame {
 
     pub va_args: Vec<Value>,
 
+    /// Receiver bound by a direct method invocation (`obj.method(...)`).
+    /// Takes precedence over `closure.this_ref`, which is used by lambdas
+    /// created inside methods.
+    pub bound_this: Option<*mut Instance>,
+
     pub discard_return_value: bool,
 }
 impl CallFrame {
@@ -97,6 +102,7 @@ impl CallFrame {
             closure,
             pc: 0,
             va_args,
+            bound_this: None,
             discard_return_value: false,
         }
     }
@@ -373,16 +379,9 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
+                                    stack.push(Value::Closure(method));
                                     stack.push(opr2);
-                                    self.call_routine(1)?;
+                                    self.call_top(1, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -428,16 +427,9 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
+                                    stack.push(Value::Closure(method));
                                     stack.push(opr2);
-                                    self.call_routine(1)?;
+                                    self.call_top(1, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -483,16 +475,9 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
+                                    stack.push(Value::Closure(method));
                                     stack.push(opr2);
-                                    self.call_routine(1)?;
+                                    self.call_top(1, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -543,16 +528,9 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
+                                    stack.push(Value::Closure(method));
                                     stack.push(opr2);
-                                    self.call_routine(1)?;
+                                    self.call_top(1, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -603,16 +581,9 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
+                                    stack.push(Value::Closure(method));
                                     stack.push(opr2);
-                                    self.call_routine(1)?;
+                                    self.call_top(1, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -650,15 +621,8 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
-                                    self.call_routine(0)?;
+                                    stack.push(Value::Closure(method));
+                                    self.call_top(0, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -723,15 +687,8 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    self.get_stack().push(f);
-                                    self.call_routine(0)?;
+                                    stack.push(Value::Closure(method));
+                                    self.call_top(0, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -850,7 +807,9 @@ impl Vm {
                 }
                 // copy current this_ref to loaded closure
                 // for cases when lambda or functions are defined inside methods.
-                let cur_this_ref = unsafe { (*closure).this_ref.clone() };
+                let cur_this_ref = call_frame
+                    .bound_this
+                    .or(unsafe { (*closure).this_ref });
                 let closure = Closure {
                     marked: false,
                     chunk,
@@ -934,6 +893,12 @@ impl Vm {
             Instr::GetProperty => {
                 self.exec_get_property()?;
             }
+            Instr::InvokeProperty(argc) => {
+                self.exec_invoke_property(argc)?;
+            }
+            Instr::InvokeSuper(argc) => {
+                self.exec_invoke_super(argc)?;
+            }
             Instr::SetCollection(va) => {
                 let val = stack.pop().unwrap();
                 let idx = stack.pop().unwrap();
@@ -985,17 +950,10 @@ impl Vm {
                                 unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
+                                    stack.push(Value::Closure(method));
                                     stack.push(idx);
                                     stack.push(val);
-                                    self.call_routine2(2, true)?;
+                                    self.call_top(2, Some(p_instance), true)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -1104,15 +1062,8 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
-                                    self.call_routine(0)?;
+                                    stack.push(Value::Closure(method));
+                                    self.call_top(0, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -1198,15 +1149,8 @@ impl Vm {
                                 unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                             {
                                 if let ValueKind::Closure(method) = method.kind() {
-                                    let mut binded_closure = unsafe { (*method).clone() };
-                                    binded_closure.this_ref = Some(p_instance);
-                                    let mut b_binded_closure = Box::new(binded_closure);
-                                    let p_binded_closure =
-                                        b_binded_closure.as_mut() as *mut Closure;
-                                    self.objects.push(b_binded_closure);
-                                    let f = Value::Closure(p_binded_closure);
-                                    stack.push(f);
-                                    self.call_routine(0)?;
+                                    stack.push(Value::Closure(method));
+                                    self.call_top(0, Some(p_instance), false)?;
                                 } else {
                                     unreachable!()
                                 }
@@ -1225,87 +1169,46 @@ impl Vm {
                 }
             }
             Instr::Call(x) => {
-                let val = &stack[stack.len() - x - 1];
-                if let ValueKind::Closure(p_closure) = val.kind() {
-                    let mut packed_va_list = Vec::new();
-                    let chunk = unsafe { &*((*p_closure).chunk) };
-                    if chunk.parameter_num != x {
-                        if chunk.parameter_num < x && chunk.is_va {
-                            for idx in (stack.len() - x + chunk.parameter_num)..stack.len() {
-                                packed_va_list.push(stack[idx].clone());
+                let callee = stack[stack.len() - x - 1].kind();
+                match callee {
+                    ValueKind::Closure(_) | ValueKind::NativeFunction(_) => {
+                        self.call_top(x, None, false)?;
+                    }
+                    ValueKind::Klass(klass) => {
+                        let class_idx = stack.len() - x - 1;
+
+                        let mut b_instace = Box::new(Instance {
+                            marked: false,
+                            klass,
+                            fields: HashMap::new(),
+                        });
+                        let p_instance = b_instace.as_mut() as *mut Instance;
+                        self.objects.push(b_instace);
+                        let idx = self.string_pool.creat_istring("__init__");
+                        if let Some(method) = unsafe { (*klass).methods.get(&idx) } {
+                            if let ValueKind::Closure(method) = method.kind() {
+                                // Call `__init__` directly with the new instance
+                                // bound as `this`, without cloning the closure.
+                                stack[class_idx] = Value::Closure(method);
+                                self.call_top(x, Some(p_instance), false)?;
+                            } else {
+                                unreachable!()
                             }
                         } else {
-                            return Err(EvalError::CallError(
-                                self.eval_err_str(
-                                    format!(
-                                        "wrong number of argument {x}/{}",
-                                        chunk.parameter_num
-                                    )
-                                    .as_ref(),
-                                ),
-                            ));
-                        }
-                    }
-                    let call_frame =
-                        CallFrame::new(stack.len() - x, p_closure, packed_va_list);
-                    // va_list arg should be pop
-                    for _ in 0..x - chunk.parameter_num {
-                        stack.pop();
-                    }
-                    self.pc_add();
-                    self.reserve_local(chunk.num_locals - chunk.parameter_num);
-                    unsafe {
-                        (*self.executing_fiber).call_frames.push(call_frame);
-                    }
-                    self.bump_frame_epoch();
-                } else if let ValueKind::Klass(klass) = val.kind() {
-                    let class_idx = stack.len() - x - 1;
-
-                    let mut b_instace = Box::new(Instance {
-                        marked: false,
-                        klass,
-                        fields: HashMap::new(),
-                    });
-                    let p_instance = b_instace.as_mut() as *mut Instance;
-                    self.objects.push(b_instace);
-                    let idx = self.string_pool.creat_istring("__init__");
-                    if let Some(method) = unsafe { (*klass).methods.get(&idx) } {
-                        if let ValueKind::Closure(method) = method.kind() {
-                            let mut binded_closure = unsafe { (*method).clone() };
-                            binded_closure.this_ref = Some(p_instance);
-                            let mut b_binded_closure = Box::new(binded_closure);
-                            let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
-                            self.objects.push(b_binded_closure);
-                            let init_method = Value::Closure(p_binded_closure);
-                            stack[class_idx] = init_method;
-                            self.call_routine(x)?;
-                            // constructor evaluate to Nil
-                        } else {
-                            unreachable!()
-                        }
-                    } else {
-                        // no __init__() definded
-                        for _ in 0..x {
+                            // no __init__() definded
+                            for _ in 0..x {
+                                stack.pop();
+                            }
                             stack.pop();
+                            stack.push(Value::Instance(p_instance));
+                            self.pc_add();
                         }
-                        stack.pop();
-                        stack.push(Value::Instance(p_instance));
-                        self.pc_add();
                     }
-                } else if let ValueKind::NativeFunction(f) = val.kind() {
-                    let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
-                    //println!("{:?}", native::sloth_print as *mut u8);
-
-                    f(self, x);
-                    if self.fiber_changed {
-                        self.fiber_changed = false;
-                    } else {
-                        self.pc_add();
+                    _ => {
+                        return Err(EvalError::CallError(
+                            self.eval_err_str("calling object which is not Callable"),
+                        ));
                     }
-                } else {
-                    return Err(EvalError::CallError(
-                        self.eval_err_str("calling object which is not Callable"),
-                    ));
                 }
             }
 
@@ -1480,7 +1383,10 @@ impl Vm {
                 }
             }
             Instr::GetThis => {
-                let t = unsafe { (*closure).this_ref.unwrap() };
+                let t = call_frame
+                    .bound_this
+                    .or(unsafe { (*closure).this_ref })
+                    .unwrap();
                 stack.push(Value::Instance(t));
                 self.pc_add();
             }
@@ -1547,15 +1453,9 @@ impl Vm {
                         unsafe { (*instance.klass).methods.get(&protocol_func_name) }
                     {
                         if let ValueKind::Closure(method) = method.kind() {
-                            let mut binded_closure = unsafe { (*method).clone() };
-                            binded_closure.this_ref = Some(p_instance);
-                            let mut b_binded_closure = Box::new(binded_closure);
-                            let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
-                            self.objects.push(b_binded_closure);
-                            let f = Value::Closure(p_binded_closure);
-                            self.get_stack().push(f);
+                            self.get_stack().push(Value::Closure(method));
                             self.get_stack().push(opr2);
-                            self.call_routine(1)?;
+                            self.call_top(1, Some(p_instance), false)?;
                         } else {
                             unreachable!()
                         }
@@ -1625,15 +1525,9 @@ impl Vm {
                 let protocol_name = self.string_pool.creat_istring("__index__");
                 if let Some(method) = unsafe { (*(*p_instance).klass).methods.get(&protocol_name) } {
                     if let ValueKind::Closure(method) = method.kind() {
-                        let mut binded_closure = unsafe { (*method).clone() };
-                        binded_closure.this_ref = Some(p_instance);
-                        let mut b_binded_closure = Box::new(binded_closure);
-                        let p_binded_closure = b_binded_closure.as_mut() as *mut Closure;
-                        self.objects.push(b_binded_closure);
-                        let f = Value::Closure(p_binded_closure);
-                        stack.push(f);
+                        stack.push(Value::Closure(method));
                         stack.push(idx);
-                        self.call_routine(1)?;
+                        self.call_top(1, Some(p_instance), false)?;
                     } else {
                         unreachable!()
                     }
@@ -1762,59 +1656,188 @@ impl Vm {
         Ok(())
     }
 
-    fn call_routine(&mut self, arg_cnt: usize) -> Result<(), EvalError> {
-        self.call_routine2(arg_cnt, false)
-    }
-    fn call_routine2(
-        &mut self,
-        arg_cnt: usize,
-        discard_return_value: bool,
-    ) -> Result<(), EvalError> {
-        let stack = self.get_stack();
-        let x = arg_cnt;
-        let val = &stack[stack.len() - x - 1];
-        if let ValueKind::Closure(p_closure) = val.kind() {
-            let mut packed_va_list = Vec::new();
-            let chunk = unsafe { &*((*p_closure).chunk) };
-            if chunk.parameter_num != x {
-                if chunk.parameter_num < x && chunk.is_va {
-                    for idx in (stack.len() - x + chunk.parameter_num)..stack.len() {
-                        packed_va_list.push(stack[idx].clone());
+    /// `receiver.property(args...)`
+    ///
+    /// Fast path for the common `obj.method(...)` form.  The stack layout is
+    /// `[receiver, name, arg0, ..., argN-1]`; the name is the constant loaded by
+    /// the compiler just before this instruction.
+    ///
+    /// Instance methods are called through the original closure stored in the
+    /// class method table.  The receiver is carried by
+    /// [`CallFrame::bound_this`] instead of allocating a bound closure.
+    fn exec_invoke_property(&mut self, argc: usize) -> EvalResult {
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        let recv_idx = stack.len() - argc - 2;
+        let name = match stack[recv_idx + 1].kind() {
+            ValueKind::String(s) => s,
+            _ => {
+                return Err(EvalError::TypeError(
+                    self.eval_err_str("property name must be a String"),
+                ))
+            }
+        };
+        let receiver = stack[recv_idx].clone();
+        match receiver.kind() {
+            ValueKind::Instance(p_instance) => {
+                let instance = unsafe { &mut *p_instance };
+                if let Some(v) = instance.fields.get(&name) {
+                    // Field values are called without binding `this`, matching
+                    // the previous `GetProperty` + `Call` behaviour.
+                    let v = v.clone();
+                    stack[recv_idx] = v;
+                    stack.remove(recv_idx + 1);
+                    self.call_top(argc, None, false)?;
+                } else if let Some(method) = unsafe { (*instance.klass).methods.get(&name) } {
+                    if let ValueKind::Closure(method) = method.kind() {
+                        stack[recv_idx] = Value::Closure(method);
+                        stack.remove(recv_idx + 1);
+                        self.call_top(argc, Some(p_instance), false)?;
+                    } else {
+                        unreachable!()
                     }
                 } else {
-                    return Err(EvalError::CallError(self.eval_err_str(
-                        format!("wrong number of argument {x}/{}", chunk.parameter_num).as_ref(),
-                    )));
+                    return Err(EvalError::VariableNotFound(
+                        self.eval_err_str("method not found"),
+                    ));
                 }
             }
-            let mut call_frame = CallFrame::new(stack.len() - x, p_closure, packed_va_list);
-            call_frame.discard_return_value = discard_return_value;
-            // va_list arg should be pop
-            for _ in 0..x - chunk.parameter_num {
-                stack.pop();
+            ValueKind::Array(_) => {
+                // Extension methods are native functions that expect the
+                // receiver directly below the callee, so keep both slots.
+                stack[recv_idx + 1] = {
+                    let ext_name =
+                        self.get_builtin_type_extension_name("Array", name.get_inner());
+                    self.global.last().unwrap()[&ext_name].clone()
+                };
+                self.call_top(argc, None, false)?;
             }
-            self.pc_add();
-            self.reserve_local(chunk.num_locals - chunk.parameter_num);
-            unsafe {
-                (*self.executing_fiber).call_frames.push(call_frame);
+            ValueKind::Dictionary(p_dict) | ValueKind::Module(p_dict) => {
+                let m = unsafe { &mut *p_dict };
+                let v = match m.dict.get(&name) {
+                    Some(v) => v.clone(),
+                    None => {
+                        return Err(EvalError::KeyError(
+                            self.eval_err_str("unknown key to module"),
+                        ))
+                    }
+                };
+                stack[recv_idx] = v;
+                stack.remove(recv_idx + 1);
+                self.call_top(argc, None, false)?;
             }
-            self.bump_frame_epoch();
-            return Ok(());
-        } else if let ValueKind::NativeFunction(f) = val.kind() {
-            let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
-            //println!("{:?}", native::sloth_print as *mut u8);
-            f(self, x);
-            if self.fiber_changed {
-                self.fiber_changed = false;
-            } else {
-                self.pc_add();
+            v => {
+                return Err(EvalError::TypeError(
+                    self.eval_err_str(format!("{:?} can not be indexed", v).as_ref()),
+                ));
             }
-            return Ok(());
-        } else {
-            return Err(EvalError::CallError(
-                self.eval_err_str("calling object which is not Callable"),
-            ));
+        };
+        Ok(())
+    }
+
+    /// `super.property(args...)`
+    ///
+    /// Like [`Vm::exec_invoke_property`], but the method lookup starts at the
+    /// receiver's superclass.
+    fn exec_invoke_super(&mut self, argc: usize) -> EvalResult {
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        let recv_idx = stack.len() - argc - 2;
+        let name = match stack[recv_idx + 1].kind() {
+            ValueKind::String(s) => s,
+            _ => {
+                return Err(EvalError::TypeError(
+                    self.eval_err_str("property name must be a String"),
+                ))
+            }
+        };
+        let receiver = stack[recv_idx].clone();
+        let p_instance = match receiver.kind() {
+            ValueKind::Instance(p_instance) => p_instance,
+            _ => unreachable!(),
+        };
+
+        let mut super_class = unsafe { (*(*p_instance).klass).super_klass };
+        while super_class != ptr::null_mut() {
+            if let Some(method) = unsafe { (*super_class).methods.get(&name) } {
+                if let ValueKind::Closure(method) = method.kind() {
+                    stack[recv_idx] = Value::Closure(method);
+                    stack.remove(recv_idx + 1);
+                    self.call_top(argc, Some(p_instance), false)?;
+                    return Ok(());
+                }
+            }
+            super_class = unsafe { (*super_class).super_klass };
         }
+        Err(EvalError::VariableNotFound(
+            self.eval_err_str("method not found"),
+        ))
+    }
+
+    /// Call the value at `stack.len() - arg_cnt - 1`.
+    ///
+    /// `bound_this` is stored in the newly pushed frame for direct method
+    /// invocations.  It takes precedence over `closure.this_ref` in
+    /// [`Instr::GetThis`].
+    fn call_top(
+        &mut self,
+        arg_cnt: usize,
+        bound_this: Option<*mut Instance>,
+        discard_return_value: bool,
+    ) -> Result<(), EvalError> {
+        let x = arg_cnt;
+        let stack = self.get_stack();
+        let callee = stack[stack.len() - x - 1].kind();
+        match callee {
+            ValueKind::Closure(p_closure) => {
+                let mut packed_va_list = Vec::new();
+                let chunk = unsafe { &*((*p_closure).chunk) };
+                if chunk.parameter_num != x {
+                    if chunk.parameter_num < x && chunk.is_va {
+                        for idx in (stack.len() - x + chunk.parameter_num)..stack.len() {
+                            packed_va_list.push(stack[idx].clone());
+                        }
+                    } else {
+                        return Err(EvalError::CallError(
+                            self.eval_err_str(
+                                format!(
+                                    "wrong number of argument {x}/{}",
+                                    chunk.parameter_num
+                                )
+                                .as_ref(),
+                            ),
+                        ));
+                    }
+                }
+                let mut call_frame =
+                    CallFrame::new(stack.len() - x, p_closure, packed_va_list);
+                call_frame.bound_this = bound_this;
+                call_frame.discard_return_value = discard_return_value;
+                // va_list arg should be pop
+                for _ in 0..x - chunk.parameter_num {
+                    stack.pop();
+                }
+                self.pc_add();
+                self.reserve_local(chunk.num_locals - chunk.parameter_num);
+                unsafe {
+                    (*self.executing_fiber).call_frames.push(call_frame);
+                }
+                self.bump_frame_epoch();
+            }
+            ValueKind::NativeFunction(f) => {
+                let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
+                f(self, x);
+                if self.fiber_changed {
+                    self.fiber_changed = false;
+                } else {
+                    self.pc_add();
+                }
+            }
+            _ => {
+                return Err(EvalError::CallError(
+                    self.eval_err_str("calling object which is not Callable"),
+                ));
+            }
+        }
+        Ok(())
     }
     fn new_upvalue_object(&mut self, idx: usize) -> *mut UpValueObject {
         let mut ret = Box::new(UpValueObject {
