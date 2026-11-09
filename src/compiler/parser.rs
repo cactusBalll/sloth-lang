@@ -779,9 +779,9 @@ impl<'a> ParserCtx<'a> {
                 let modified_instr = match last_instr {
                     Instr::GetCollection => {
                         // idx already on stack[top-1]
-                        Instr::SetCollection(0)
+                        Instr::SetCollection
                     }
-                    Instr::GetProperty => Instr::SetCollection(1),
+                    Instr::GetProperty => Instr::SetProperty,
                     Instr::GetLocal(x) => Instr::SetLocal(x),
                     Instr::GetGlobal(x) => Instr::SetGlobal(x),
                     Instr::GetUpValue(x) => Instr::SetUpValue(x),

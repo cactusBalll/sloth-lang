@@ -80,6 +80,7 @@ pub enum OpCode {
     GetProperty = 51,
     InvokeProperty = 52,
     InvokeSuper = 53,
+    SetProperty = 54,
 }
 
 impl OpCode {
@@ -147,6 +148,7 @@ impl OpCode {
             51 => GetProperty,
             52 => InvokeProperty,
             53 => InvokeSuper,
+            54 => SetProperty,
             _ => return None,
         })
     }
@@ -184,10 +186,10 @@ pub enum Instr {
     /// Like [`Instr::InvokeProperty`], but starts the method lookup at the
     /// receiver's superclass.
     InvokeSuper(usize),
-    /// `collection[index] = value` / `collection.property = value`
-    /// 0 - []
-    /// 1 - .
-    SetCollection(usize),
+    /// `collection[index] = value`
+    SetCollection,
+    /// `collection.property = value`
+    SetProperty,
 
     Add,
     Sub,
@@ -295,7 +297,8 @@ fn instr_len(instr: &Instr) -> usize {
         Nop | PushNil | Add | Sub | Mul | Div | Mod | Negate | Not | And | Or | Gt | Lt | Ge
         | Le | Eq | Ne | LoadTrue | LoadFalse | ClassIs | Pop | Swap2 | Return
         | MakeRange | MakeRangeClosed | Iterator | Next | InitClass | AddMethod | ClassExtend
-        | GetSuperMethod | GetThis | UnpackVA | GetCollection | GetProperty => 1,
+        | GetSuperMethod | GetThis | UnpackVA | GetCollection | GetProperty | SetCollection
+        | SetProperty => 1,
         JumpIfNot(_) | JumpIfTrue(_) | Jump(_) => 1 + JUMP_OPERAND_SIZE,
         Load(x)
         | LoadChunk(x)
@@ -307,7 +310,6 @@ fn instr_len(instr: &Instr) -> usize {
         | SetUpValue(x)
         | InitArray(x)
         | InitDict(x)
-        | SetCollection(x)
         | Call(x)
         | InvokeProperty(x)
         | InvokeSuper(x) => 1 + leb128_len(*x as u64),
@@ -404,10 +406,8 @@ fn encode_one(instr: &Instr, index: usize, offsets: &[usize], out: &mut Vec<u8>)
             op(out, OpCode::InvokeSuper);
             write_u64(out, *x as u64);
         }
-        SetCollection(x) => {
-            op(out, OpCode::SetCollection);
-            write_u64(out, *x as u64);
-        }
+        SetCollection => op(out, OpCode::SetCollection),
+        SetProperty => op(out, OpCode::SetProperty),
         Add => op(out, OpCode::Add),
         Sub => op(out, OpCode::Sub),
         Mul => op(out, OpCode::Mul),
@@ -497,7 +497,8 @@ pub fn decode_instr(code: &[u8], pc: usize) -> Result<(Instr, usize), u8> {
         OpCode::GetProperty => GetProperty,
         OpCode::InvokeProperty => InvokeProperty(read_operand(code, operand_pc, pc)?),
         OpCode::InvokeSuper => InvokeSuper(read_operand(code, operand_pc, pc)?),
-        OpCode::SetCollection => SetCollection(read_operand(code, operand_pc, pc)?),
+        OpCode::SetCollection => SetCollection,
+        OpCode::SetProperty => SetProperty,
         OpCode::Add => Add,
         OpCode::Sub => Sub,
         OpCode::Mul => Mul,
@@ -589,7 +590,9 @@ fn instruction_len(code: &[u8], pc: usize, instr: &Instr) -> Result<usize, u8> {
         | OpCode::GetThis
         | OpCode::UnpackVA
         | OpCode::GetCollection
-        | OpCode::GetProperty => 1,
+        | OpCode::GetProperty
+        | OpCode::SetCollection
+        | OpCode::SetProperty => 1,
         OpCode::JumpIfNot | OpCode::JumpIfTrue | OpCode::Jump => {
             1 + JUMP_OPERAND_SIZE
         }

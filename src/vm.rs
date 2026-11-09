@@ -899,87 +899,11 @@ impl Vm {
             Instr::InvokeSuper(argc) => {
                 self.exec_invoke_super(argc)?;
             }
-            Instr::SetCollection(va) => {
-                let val = stack.pop().unwrap();
-                let idx = stack.pop().unwrap();
-                let clct = stack.pop().unwrap();
-                match clct.kind() {
-                    ValueKind::Array(p_array) => {
-                        if let ValueKind::Number(i) = idx.kind() {
-                            if i < 0. {
-                                return Err(EvalError::IndexOutOfBound(self.eval_err_str(
-                                    "Array cannot be indexed by negative value",
-                                )));
-                            }
-                            let i = i as usize;
-                            let arr = unsafe { &mut *p_array };
-                            if let Some(elem) = arr.array.get_mut(i) {
-                                *elem = val;
-                            } else {
-                                return Err(EvalError::IndexOutOfBound(
-                                    self.eval_err_str("Array index out of bound"),
-                                ));
-                            }
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("Array can only be indexed by Number"),
-                            ));
-                        }
-                        self.pc_add();
-                    }
-                    ValueKind::Dictionary(p_dict) => {
-                        if let ValueKind::String(i) = idx.kind() {
-                            let dict = unsafe { &mut *p_dict };
-                            if let Some(elem) = dict.dict.get_mut(&i) {
-                                *elem = val;
-                            } else {
-                                dict.dict.insert(i, val);
-                            }
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("Dict can only be indexed by String"),
-                            ));
-                        }
-                        self.pc_add();
-                    }
-                    ValueKind::Instance(p_instance) => {
-                        if va == 0 {
-                            // this.__assign__(idx, val)
-                            let protocol_name = self.string_pool.creat_istring("__assign__");
-                            if let Some(method) =
-                                unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
-                            {
-                                if let ValueKind::Closure(method) = method.kind() {
-                                    stack.push(Value::Closure(method));
-                                    stack.push(idx);
-                                    stack.push(val);
-                                    self.call_top(2, Some(p_instance), true)?;
-                                } else {
-                                    unreachable!()
-                                }
-                            } else {
-                                return Err(EvalError::VariableNotFound(
-                                    self.eval_err_str("`__assign__` method not found"),
-                                ));
-                            }
-                        } else {
-                            if let ValueKind::String(i) = idx.kind() {
-                                let instance = unsafe { &mut *p_instance };
-                                instance.fields.insert(i.clone(), val);
-                            } else {
-                                return Err(EvalError::TypeError(
-                                    self.eval_err_str("Instance can only be indexed by String"),
-                                ));
-                            }
-                            self.pc_add();
-                        }
-                    }
-                    v => {
-                        return Err(EvalError::TypeError(self.eval_err_str(
-                            format!("{:?} cannot be indexed and assigned to", v).as_ref(),
-                        )));
-                    }
-                }
+            Instr::SetCollection => {
+                self.exec_set_collection()?;
+            }
+            Instr::SetProperty => {
+                self.exec_set_property()?;
             }
             Instr::Jump(x) => {
                 let last_pc = call_frame.pc as i32;
@@ -1731,6 +1655,121 @@ impl Vm {
                 ));
             }
         };
+        Ok(())
+    }
+
+    /// `collection[index] = value`
+    fn exec_set_collection(&mut self) -> EvalResult {
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        let val = stack.pop().unwrap();
+        let idx = stack.pop().unwrap();
+        let clct = stack.pop().unwrap();
+        match clct.kind() {
+            ValueKind::Array(p_array) => {
+                if let ValueKind::Number(i) = idx.kind() {
+                    if i < 0. {
+                        return Err(EvalError::IndexOutOfBound(self.eval_err_str(
+                            "Array cannot be indexed by negative value",
+                        )));
+                    }
+                    let i = i as usize;
+                    let arr = unsafe { &mut *p_array };
+                    if let Some(elem) = arr.array.get_mut(i) {
+                        *elem = val;
+                    } else {
+                        return Err(EvalError::IndexOutOfBound(
+                            self.eval_err_str("Array index out of bound"),
+                        ));
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Array can only be indexed by Number"),
+                    ));
+                }
+                self.pc_add();
+            }
+            ValueKind::Dictionary(p_dict) => {
+                if let ValueKind::String(i) = idx.kind() {
+                    let dict = unsafe { &mut *p_dict };
+                    if let Some(elem) = dict.dict.get_mut(&i) {
+                        *elem = val;
+                    } else {
+                        dict.dict.insert(i, val);
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Dict can only be indexed by String"),
+                    ));
+                }
+                self.pc_add();
+            }
+            ValueKind::Instance(p_instance) => {
+                // this.__assign__(idx, val)
+                let protocol_name = self.string_pool.creat_istring("__assign__");
+                if let Some(method) =
+                    unsafe { (*(*p_instance).klass).methods.get(&protocol_name) }
+                {
+                    if let ValueKind::Closure(method) = method.kind() {
+                        stack.push(Value::Closure(method));
+                        stack.push(idx);
+                        stack.push(val);
+                        self.call_top(2, Some(p_instance), true)?;
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    return Err(EvalError::VariableNotFound(
+                        self.eval_err_str("`__assign__` method not found"),
+                    ));
+                }
+            }
+            v => {
+                return Err(EvalError::TypeError(self.eval_err_str(
+                    format!("{:?} cannot be indexed and assigned to", v).as_ref(),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// `collection.property = value`
+    fn exec_set_property(&mut self) -> EvalResult {
+        let stack = unsafe { &mut (*self.executing_fiber).stack };
+        let val = stack.pop().unwrap();
+        let idx = stack.pop().unwrap();
+        let clct = stack.pop().unwrap();
+        match clct.kind() {
+            ValueKind::Dictionary(p_dict) => {
+                if let ValueKind::String(i) = idx.kind() {
+                    let dict = unsafe { &mut *p_dict };
+                    if let Some(elem) = dict.dict.get_mut(&i) {
+                        *elem = val;
+                    } else {
+                        dict.dict.insert(i, val);
+                    }
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Dict can only be indexed by String"),
+                    ));
+                }
+                self.pc_add();
+            }
+            ValueKind::Instance(p_instance) => {
+                if let ValueKind::String(i) = idx.kind() {
+                    unsafe { (*p_instance).fields.insert(i.clone(), val) };
+                } else {
+                    return Err(EvalError::TypeError(
+                        self.eval_err_str("Instance can only be indexed by String"),
+                    ));
+                }
+                self.pc_add();
+            }
+            v => {
+                return Err(EvalError::TypeError(self.eval_err_str(
+                    format!("{:?} cannot have properties assigned to", v).as_ref(),
+                )));
+            }
+        }
         Ok(())
     }
 
