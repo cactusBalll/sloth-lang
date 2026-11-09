@@ -59,12 +59,10 @@ pub enum OpCode {
     Pop = 32,
     Swap2 = 33,
     Call = 34,
-    TryCall = 35,
     JumpIfNot = 36,
     JumpIfTrue = 37,
     Jump = 38,
     Return = 39,
-    Except = 40,
 
     MakeRange = 41,
     MakeRangeClosed = 42,
@@ -125,12 +123,10 @@ impl OpCode {
             32 => Pop,
             33 => Swap2,
             34 => Call,
-            35 => TryCall,
             36 => JumpIfNot,
             37 => JumpIfTrue,
             38 => Jump,
             39 => Return,
-            40 => Except,
 
             41 => MakeRange,
             42 => MakeRangeClosed,
@@ -200,12 +196,10 @@ pub enum Instr {
     Swap2,       /*change top 2 value on the stack*/
     Call(usize), /*parameter num*/
 
-    TryCall(usize),
     JumpIfNot(i32),
     JumpIfTrue(i32),
     Jump(i32),
     Return,
-    Except,
 
     MakeRange,
     MakeRangeClosed,
@@ -280,7 +274,7 @@ fn instr_len(instr: &Instr) -> usize {
     use Instr::*;
     match instr {
         Nop | PushNil | Add | Sub | Mul | Div | Mod | Negate | Not | And | Or | Gt | Lt | Ge
-        | Le | Eq | Ne | LoadTrue | LoadFalse | ClassIs | Pop | Swap2 | Return | Except
+        | Le | Eq | Ne | LoadTrue | LoadFalse | ClassIs | Pop | Swap2 | Return
         | MakeRange | MakeRangeClosed | Iterator | Next | InitClass | AddMethod | ClassExtend
         | GetSuperMethod | GetThis | UnpackVA => 1,
         JumpIfNot(_) | JumpIfTrue(_) | Jump(_) => 1 + JUMP_OPERAND_SIZE,
@@ -296,8 +290,7 @@ fn instr_len(instr: &Instr) -> usize {
         | InitDict(x)
         | GetCollection(x)
         | SetCollection(x)
-        | Call(x)
-        | TryCall(x) => 1 + leb128_len(*x as u64),
+        | Call(x) => 1 + leb128_len(*x as u64),
     }
 }
 
@@ -413,10 +406,6 @@ fn encode_one(instr: &Instr, index: usize, offsets: &[usize], out: &mut Vec<u8>)
             op(out, OpCode::Call);
             write_u64(out, *x as u64);
         }
-        TryCall(x) => {
-            op(out, OpCode::TryCall);
-            write_u64(out, *x as u64);
-        }
         JumpIfNot(x) => {
             op(out, OpCode::JumpIfNot);
             encode_jump(out, index, *x, offsets);
@@ -430,7 +419,6 @@ fn encode_one(instr: &Instr, index: usize, offsets: &[usize], out: &mut Vec<u8>)
             encode_jump(out, index, *x, offsets);
         }
         Return => op(out, OpCode::Return),
-        Except => op(out, OpCode::Except),
         MakeRange => op(out, OpCode::MakeRange),
         MakeRangeClosed => op(out, OpCode::MakeRangeClosed),
         Iterator => op(out, OpCode::Iterator),
@@ -502,12 +490,10 @@ pub fn decode_instr(code: &[u8], pc: usize) -> Result<(Instr, usize), u8> {
         OpCode::Pop => Pop,
         OpCode::Swap2 => Swap2,
         OpCode::Call => Call(read_operand(code, operand_pc, pc)?),
-        OpCode::TryCall => TryCall(read_operand(code, operand_pc, pc)?),
         OpCode::JumpIfNot => JumpIfNot(read_jump(code, operand_pc, pc)?),
         OpCode::JumpIfTrue => JumpIfTrue(read_jump(code, operand_pc, pc)?),
         OpCode::Jump => Jump(read_jump(code, operand_pc, pc)?),
         OpCode::Return => Return,
-        OpCode::Except => Except,
         OpCode::MakeRange => MakeRange,
         OpCode::MakeRangeClosed => MakeRangeClosed,
         OpCode::Iterator => Iterator,
@@ -563,7 +549,6 @@ fn instruction_len(code: &[u8], pc: usize, instr: &Instr) -> Result<usize, u8> {
         | OpCode::Pop
         | OpCode::Swap2
         | OpCode::Return
-        | OpCode::Except
         | OpCode::MakeRange
         | OpCode::MakeRangeClosed
         | OpCode::Iterator

@@ -58,7 +58,6 @@ impl<'a> ScannerCtx<'a> {
             ("func", Token::Function),
             ("nil", Token::Nil),
             ("return", Token::Return),
-            ("except", Token::Except),
             ("class", Token::Class),
             ("super", Token::Super),
             ("break", Token::Break),

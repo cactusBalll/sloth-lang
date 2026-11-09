@@ -176,7 +176,7 @@ macro_rules! derive_gcobject {
 fn mark_value(val: &Value) {
     match val.kind() {
         ValueKind::Array(p_arr) => unsafe { mark_gc_object(&mut *p_arr) },
-        ValueKind::Dictionary(p_dict) | ValueKind::Error(p_dict) | ValueKind::Module(p_dict) => unsafe {
+        ValueKind::Dictionary(p_dict) | ValueKind::Module(p_dict) => unsafe {
             mark_gc_object(&mut *p_dict)
         },
         ValueKind::Closure(p_closure) => unsafe { mark_gc_object(&mut *p_closure) },
@@ -434,7 +434,7 @@ impl PartialEq for Closure {
         self.chunk == other.chunk
     }
 }
-type NativeFunction = fn(&mut Vm, usize, bool);
+type NativeFunction = fn(&mut Vm, usize);
 #[cfg(test)]
 mod test {
     use crate::run_string_debug;

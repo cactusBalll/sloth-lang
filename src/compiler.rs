@@ -58,7 +58,6 @@ pub enum Token {
     Function,
 
     Return,
-    Except,
 
     PipeOp,    // |>
     AddAssign, // +=

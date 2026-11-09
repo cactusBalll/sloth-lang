@@ -125,7 +125,7 @@ runtime ABI：
 - `Iterator` / `Next`
 - `LoadChunk` / 闭包
 - upvalue / global / this
-- `Call` / `Return` / `Except`
+- `Call` / `Return`
 - `InitArray` / `InitDict` / GC
 - native 模块函数
 - 错误处理
@@ -178,7 +178,7 @@ sloth_rt_load_chunk
 sloth_rt_get_global / set_global
 sloth_rt_get_upvalue / set_upvalue
 sloth_rt_get_this / unpack_va
-sloth_rt_call / return / except
+sloth_rt_call / return
 ```
 
 ## `Vm` 重构

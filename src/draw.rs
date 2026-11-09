@@ -40,7 +40,7 @@ fn to_c_str(s: &IString) -> CString {
     let c_str = s.get_inner().to_owned();
     CString::new(c_str).unwrap()
 }
-pub fn draw_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_create(vm: &mut Vm, arg_num: usize) {
     arity_assert!(4, arg_num);
     let map_size = vm.gets_number() as usize;
     let t = vm.gets_string();
@@ -84,7 +84,7 @@ pub fn draw_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
         .push(Value::OpaqueData(p_draw_ctx as *mut u8));
 }
 
-pub fn draw_should_close(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_should_close(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let _ = vm.get_stack().pop();
     let _ = vm.get_stack().pop();
@@ -92,7 +92,7 @@ pub fn draw_should_close(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Bool(b));
 }
 
-pub fn draw_set_block(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_set_block(vm: &mut Vm, arg_num: usize) {
     arity_assert!(4, arg_num);
     let color = vm.gets_number();
     let j = vm.gets_number();
@@ -106,7 +106,7 @@ pub fn draw_set_block(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn draw_get_block(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_get_block(vm: &mut Vm, arg_num: usize) {
     arity_assert!(3, arg_num);
     let j = vm.gets_number();
     let i = vm.gets_number();
@@ -118,7 +118,7 @@ pub fn draw_get_block(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn draw_set_camera_pos(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_set_camera_pos(vm: &mut Vm, arg_num: usize) {
     arity_assert!(4, arg_num);
     let z = vm.gets_number();
     let y = vm.gets_number();
@@ -137,7 +137,7 @@ pub fn draw_set_camera_pos(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn draw_is_key_pressed(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_is_key_pressed(vm: &mut Vm, arg_num: usize) {
     arity_assert!(2, arg_num);
     let key = vm.gets_number();
     let op_data = vm.gets_opaque() as *mut DrawCtx;
@@ -148,7 +148,7 @@ pub fn draw_is_key_pressed(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn draw_get_frame_time(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_get_frame_time(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let op_data = vm.gets_opaque() as *mut DrawCtx;
     let _ = vm.get_stack().pop();
@@ -158,7 +158,7 @@ pub fn draw_get_frame_time(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn draw_render_blocks(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_render_blocks(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let op_data = vm.gets_opaque() as *mut DrawCtx;
     let _ = vm.get_stack().pop();
@@ -193,7 +193,7 @@ pub fn draw_render_blocks(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn draw_destory(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_destory(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let op_data = vm.gets_opaque() as *mut DrawCtx;
     let _ = vm.get_stack().pop();
@@ -205,7 +205,7 @@ pub fn draw_destory(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn draw_random(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn draw_random(vm: &mut Vm, arg_num: usize) {
     arity_assert!(0, arg_num);
     let _ = vm.get_stack().pop();
     let v = unsafe { raylib::ffi::GetRandomValue(0, 65535) };

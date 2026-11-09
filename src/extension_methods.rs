@@ -14,7 +14,7 @@ macro_rules! mf_entry {
     };
 }
 
-pub fn array_push(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn array_push(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let v = vm.get_stack().pop().unwrap();
     let _ = vm.get_stack().pop();
@@ -32,7 +32,7 @@ pub fn array_push(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn array_pop(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn array_pop(vm: &mut Vm, arg_num: usize) {
     arity_assert!(0, arg_num);
     let _ = vm.get_stack().pop();
     // Array is hided under me
@@ -48,7 +48,7 @@ pub fn array_pop(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn array_pop_front(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn array_pop_front(vm: &mut Vm, arg_num: usize) {
     arity_assert!(0, arg_num);
     let _ = vm.get_stack().pop();
     // Array is hided under me
@@ -64,7 +64,7 @@ pub fn array_pop_front(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn array_remove(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn array_remove(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let idx = vm.gets_number();
     let _ = vm.get_stack().pop();
@@ -81,7 +81,7 @@ pub fn array_remove(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn array_insert(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn array_insert(vm: &mut Vm, arg_num: usize) {
     arity_assert!(2, arg_num);
     let v = vm.get_stack().pop().unwrap();
     let idx = vm.gets_number();

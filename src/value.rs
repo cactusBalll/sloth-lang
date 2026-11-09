@@ -31,7 +31,6 @@ pub enum ValueKind {
     //Symbol(IString),
     Array(*mut Array),
     Dictionary(*mut Dict),
-    Error(*mut Dict),
     Module(*mut Dict),
     Closure(*mut Closure),
     NativeFunction(*mut u8), //void*
@@ -60,7 +59,6 @@ pub enum Value {
     //Symbol(IString),
     Array(*mut Array),
     Dictionary(*mut Dict),
-    Error(*mut Dict),
     Module(*mut Dict),
     Closure(*mut Closure),
     NativeFunction(*mut u8), //void*
@@ -86,7 +84,6 @@ impl Value {
             Value::String(s) => ValueKind::String(s.clone()),
             Value::Array(p) => ValueKind::Array(*p),
             Value::Dictionary(p) => ValueKind::Dictionary(*p),
-            Value::Error(p) => ValueKind::Error(*p),
             Value::Module(p) => ValueKind::Module(*p),
             Value::Closure(p) => ValueKind::Closure(*p),
             Value::NativeFunction(p) => ValueKind::NativeFunction(*p),
@@ -128,8 +125,6 @@ const TAG_STRING: u8 = 3;
 const TAG_ARRAY: u8 = 4;
 #[cfg(feature = "nan-boxing")]
 const TAG_DICT: u8 = 5;
-#[cfg(feature = "nan-boxing")]
-const TAG_ERROR: u8 = 6;
 #[cfg(feature = "nan-boxing")]
 const TAG_MODULE: u8 = 7;
 #[cfg(feature = "nan-boxing")]
@@ -283,11 +278,6 @@ impl Value {
     }
 
     #[allow(non_snake_case)]
-    pub fn Error(ptr: *mut Dict) -> Value {
-        Value(pack(TAG_ERROR, pointer_payload(ptr)))
-    }
-
-    #[allow(non_snake_case)]
     pub fn Module(ptr: *mut Dict) -> Value {
         Value(pack(TAG_MODULE, pointer_payload(ptr)))
     }
@@ -353,7 +343,6 @@ impl Value {
             },
             TAG_ARRAY => ValueKind::Array(payload_pointer(payload)),
             TAG_DICT => ValueKind::Dictionary(payload_pointer(payload)),
-            TAG_ERROR => ValueKind::Error(payload_pointer(payload)),
             TAG_MODULE => ValueKind::Module(payload_pointer(payload)),
             TAG_CLOSURE => ValueKind::Closure(payload_pointer(payload)),
             TAG_NATIVE => ValueKind::NativeFunction(payload_pointer(payload)),
@@ -514,7 +503,6 @@ impl fmt::Debug for Value {
             ValueKind::String(s) => write!(f, "String({s:?})"),
             ValueKind::Array(p) => write!(f, "Array({p:?})"),
             ValueKind::Dictionary(p) => write!(f, "Dictionary({p:?})"),
-            ValueKind::Error(p) => write!(f, "Error({p:?})"),
             ValueKind::Module(p) => write!(f, "Module({p:?})"),
             ValueKind::Closure(p) => write!(f, "Closure({p:?})"),
             ValueKind::NativeFunction(p) => write!(f, "NativeFunction({p:?})"),
@@ -573,7 +561,6 @@ mod tests {
         let dict = 0x5678usize as *mut Dict;
         assert_eq!(Value::Array(array).kind(), ValueKind::Array(array));
         assert_eq!(Value::Dictionary(dict).kind(), ValueKind::Dictionary(dict));
-        assert_eq!(Value::Error(dict).kind(), ValueKind::Error(dict));
         assert_eq!(Value::Module(dict).kind(), ValueKind::Module(dict));
         assert_eq!(
             Value::OpaqueData(0x9abcusize as *mut u8).kind(),

@@ -320,7 +320,7 @@ let c = s.get_inner().chars().skip(i).next();
 ### P0：AOT 代码生成
 
 1. **不要每条指令都调用 `sloth_rt_set_pc`**。`pc` 只在离开当前 chunk
-   （Call/Return/Except/fiber/错误）时才需要同步；块内跳转可以直接 `br`。
+   （Call/Return/fiber/错误）时才需要同步；块内跳转可以直接 `br`。
 2. **把栈指针/frame base 暴露给生成代码**，在 IR 里直接做 push/pop/local
    load/store，而不是每条指令调用 `sloth_rt_local_get`、`sloth_rt_push`、
    `sloth_rt_pop`、`sloth_rt_peek_raw`。

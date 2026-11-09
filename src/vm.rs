@@ -11,7 +11,6 @@ use std::{
 #[derive(Debug)]
 pub enum EvalError {
     Error(String),
-    Exception(HashMap<String, Value>),
     ArithmError(String),
     TypeError(String),
     IndexOutOfBound(String),
@@ -56,7 +55,6 @@ pub struct Vm {
     top_chunk: Box<Chunk>,     // no gc during running
     top_closure: Box<Closure>, // no gc during running
     main_fiber: Box<Fiber>,    // no gc during running
-    protected: bool,
     /// should load other modules in seperated global namespace
     global: Vec<HashMap<IString, Value>>,
 
@@ -164,7 +162,6 @@ impl Vm {
             top_closure: closure,
             top_chunk: b_chunk,
             main_fiber: fiber,
-            protected: false,
             global: vec![global],
             loaded_chunk: Vec::new(),
             string_pool,
@@ -992,18 +989,6 @@ impl Vm {
                             ));
                         }
                     }
-                    ValueKind::Error(p_dict) => {
-                        if let ValueKind::String(i) = idx.kind() {
-                            let dict = unsafe { &mut *p_dict };
-                            let elem = dict.dict.get(&i).unwrap_or(&Value::Nil).clone();
-                            stack.push(elem);
-                            self.pc_add();
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("Error can only be indexed by String"),
-                            ));
-                        }
-                    }
                     ValueKind::Instance(p_instance) => {
                         if va == 0 {
                             let protocol_name = self.string_pool.creat_istring("__index__");
@@ -1129,21 +1114,6 @@ impl Vm {
                         } else {
                             return Err(EvalError::TypeError(
                                 self.eval_err_str("Dict can only be indexed by String"),
-                            ));
-                        }
-                        self.pc_add();
-                    }
-                    ValueKind::Error(p_dict) => {
-                        if let ValueKind::String(i) = idx.kind() {
-                            let dict = unsafe { &mut *p_dict };
-                            if let Some(elem) = dict.dict.get_mut(&i) {
-                                *elem = val;
-                            } else {
-                                dict.dict.insert(i, val);
-                            }
-                        } else {
-                            return Err(EvalError::TypeError(
-                                self.eval_err_str("Error can only be indexed by String"),
                             ));
                         }
                         self.pc_add();
@@ -1424,7 +1394,6 @@ impl Vm {
                         stack.pop();
                     }
                     self.pc_add();
-                    self.protected = false;
                     self.reserve_local(chunk.num_locals - chunk.parameter_num);
                     unsafe {
                         (*self.executing_fiber).call_frames.push(call_frame);
@@ -1468,7 +1437,7 @@ impl Vm {
                     let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
                     //println!("{:?}", native::sloth_print as *mut u8);
 
-                    f(self, x, false);
+                    f(self, x);
                     if self.fiber_changed {
                         self.fiber_changed = false;
                     } else {
@@ -1481,61 +1450,6 @@ impl Vm {
                 }
             }
 
-            Instr::Except => {
-                let callframe = unsafe { (*self.executing_fiber).call_frames.pop().unwrap() };
-                self.bump_frame_epoch();
-                let chunk = unsafe { &*(*callframe.closure).chunk };
-                let mut new_upvalues = Vec::new();
-                for upv in self.upvalues.iter_mut() {
-                    let mut escape = false;
-                    let mut idx = 0;
-                    if let UpValue::Ref(x) = unsafe { &(**upv).value } {
-                        if *x >= callframe.bottom {
-                            escape = true;
-                            idx = *x;
-                        }
-                    }
-                    if escape {
-                        unsafe {
-                            (**upv).value = UpValue::Closed(stack[idx].clone());
-                        }
-                    } else {
-                        new_upvalues.push(*upv);
-                    }
-                }
-                self.upvalues = new_upvalues;
-
-                if callframe.bottom + chunk.num_locals == stack.len() {
-                    for _ in callframe.bottom..stack.len() {
-                        stack.pop();
-                    }
-                    stack.pop(); //pop closure
-                    let err = Value::Error(self.new_dict(0));
-                    stack.push(err);
-                } else {
-                    let val = stack.pop().unwrap(); // closure ret_vall <- get it
-                    for _ in callframe.bottom..stack.len() {
-                        stack.pop();
-                    }
-                    stack.pop(); // pop closure
-                    stack.push(Value::String(self.string_pool.creat_istring("info")));
-                    stack.push(val); // push return value
-                    let err = Value::Error(self.new_dict(1));
-                    stack.push(err);
-                }
-
-                if !self.protected || unsafe { (*self.executing_fiber).call_frames.is_empty() }
-                {
-                    if let ValueKind::Error(p_dict) = stack.pop().unwrap().kind() {
-                        let mut hash_map = unsafe { (*p_dict).dict.clone() };
-                        return Err(EvalError::Exception(HashMap::from_iter(
-                            hash_map.iter().map(|(k, v)| (k.to_string(), v.clone())),
-                        )));
-                    } else {
-                        return Err(EvalError::Exception(HashMap::new()));
-                    }
-                }
-            }
             Instr::Return => {
                 let callframe = unsafe { (*self.executing_fiber).call_frames.pop().unwrap() };
                 self.bump_frame_epoch();
@@ -1833,7 +1747,6 @@ impl Vm {
                 stack.pop();
             }
             self.pc_add();
-            self.protected = false;
             self.reserve_local(chunk.num_locals - chunk.parameter_num);
             unsafe {
                 (*self.executing_fiber).call_frames.push(call_frame);
@@ -1843,7 +1756,7 @@ impl Vm {
         } else if let ValueKind::NativeFunction(f) = val.kind() {
             let f = unsafe { std::mem::transmute::<*mut u8, NativeFunction>(f) };
             //println!("{:?}", native::sloth_print as *mut u8);
-            f(self, x, false);
+            f(self, x);
             if self.fiber_changed {
                 self.fiber_changed = false;
             } else {

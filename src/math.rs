@@ -13,14 +13,14 @@ macro_rules! mf_entry {
     };
 }
 
-pub fn sloth_math_floor(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_math_floor(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let v = vm.gets_number();
     let _ = vm.get_stack().pop();
     vm.get_stack().push(Value::Number(v.floor()));
 }
 
-pub fn sloth_math_ceil(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_math_ceil(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let v = vm.gets_number();
     let _ = vm.get_stack().pop();

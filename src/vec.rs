@@ -14,7 +14,7 @@ macro_rules! mf_entry {
     };
 }
 
-pub fn vec_u8_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn vec_u8_create(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let length = if let ValueKind::Number(length) = vm.get_stack().pop().unwrap().kind() {
         length
@@ -29,7 +29,7 @@ pub fn vec_u8_create(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::OpaqueData(p_vec as *mut u8));
 }
 
-pub fn vec_u8_set(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn vec_u8_set(vm: &mut Vm, arg_num: usize) {
     arity_assert!(3, arg_num);
     let val = if let ValueKind::Number(val) = vm.get_stack().pop().unwrap().kind() {
         val
@@ -61,7 +61,7 @@ pub fn vec_u8_set(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn vec_u8_get(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn vec_u8_get(vm: &mut Vm, arg_num: usize) {
     arity_assert!(2, arg_num);
     let idx = if let ValueKind::Number(idx) = vm.get_stack().pop().unwrap().kind() {
         idx
@@ -85,7 +85,7 @@ pub fn vec_u8_get(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn vec_u8_len(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn vec_u8_len(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let clct = if let ValueKind::OpaqueData(clct) = vm.get_stack().pop().unwrap().kind() {
         clct
@@ -100,7 +100,7 @@ pub fn vec_u8_len(vm: &mut Vm, arg_num: usize, _protected: bool) {
         vm.get_stack().push(Value::Number(val as f64));
     }
 }
-pub fn vec_u8_destroy(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn vec_u8_destroy(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let clct = if let ValueKind::OpaqueData(clct) = vm.get_stack().pop().unwrap().kind() {
         clct
@@ -117,7 +117,7 @@ pub fn vec_u8_destroy(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn vec_u8_from_ascii_string(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn vec_u8_from_ascii_string(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let s = if let ValueKind::String(s) = vm.get_stack().pop().unwrap().kind() {
         s

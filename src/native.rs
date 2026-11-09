@@ -22,7 +22,7 @@ macro_rules! mf_entry {
     };
 }
 
-pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
+pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize) {
     let val = vm.get_stack().pop().unwrap_or(Value::Nil);
     macro_rules! vstr {
         ($s:expr) => {
@@ -37,7 +37,6 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
         ValueKind::Array(_) => vstr!("Array"),
         ValueKind::Module(_) => vstr!("Module"),
         ValueKind::Dictionary(_) => vstr!("Dict"),
-        ValueKind::Error(_) => vstr!("Err"),
         ValueKind::Closure(_) => vstr!("Closure"),
         ValueKind::NativeFunction(_) => vstr!("NativeFunction"),
         ValueKind::OpaqueData(_) => vstr!("OpaqueData"),
@@ -48,7 +47,7 @@ pub fn sloth_typeof(vm: &mut Vm, _arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::String(v));
 }
 
-pub fn sloth_add_glob(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_add_glob(vm: &mut Vm, arg_num: usize) {
     // add all kv to Global
     arity_assert!(1, arg_num);
     let p_dict = if let ValueKind::Dictionary(p_dict) = vm.get_stack().pop().unwrap().kind() {
@@ -65,7 +64,7 @@ pub fn sloth_add_glob(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn sloth_load_module(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_load_module(vm: &mut Vm, arg_num: usize) {
     if arg_num != 1 {
         vm.get_stack().pop();
         vm.get_stack().push(Value::Nil);
@@ -99,7 +98,7 @@ pub fn sloth_load_module(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn sloth_print_val(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_print_val(vm: &mut Vm, arg_num: usize) {
     let mut val_to_print = Vec::new();
     for _ in 0..arg_num {
         val_to_print.push(vm.get_stack().pop().unwrap());
@@ -116,7 +115,7 @@ pub fn sloth_print_val(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Nil);
 }
 
-pub fn sloth_input(vm: &mut Vm, _arg_num: usize, _protected: bool) {
+pub fn sloth_input(vm: &mut Vm, _arg_num: usize) {
     let mut buffer = String::new();
     // blocking...
     let _ = io::stdin().read_line(&mut buffer);
@@ -124,7 +123,7 @@ pub fn sloth_input(vm: &mut Vm, _arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::String(istring));
 }
 
-pub fn sloth_to_number(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_to_number(vm: &mut Vm, arg_num: usize) {
     let val = vm.get_stack().pop().unwrap();
     let _ = vm.get_stack().pop();
 
@@ -154,13 +153,13 @@ pub fn sloth_to_number(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Number(num));
 }
 
-pub fn sloth_to_bool(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_to_bool(vm: &mut Vm, arg_num: usize) {
     let val = vm.get_stack().pop().unwrap();
     let _ = vm.get_stack().pop();
     vm.get_stack().push(val.to_bool_v());
 }
 
-pub fn sloth_to_string(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_to_string(vm: &mut Vm, arg_num: usize) {
     let val = vm.get_stack().pop().unwrap();
     let _ = vm.get_stack().pop();
     let mut vis = HashSet::new();
@@ -173,7 +172,7 @@ pub fn sloth_to_string(vm: &mut Vm, arg_num: usize, _protected: bool) {
     }
 }
 
-pub fn sloth_va_arg(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_va_arg(vm: &mut Vm, arg_num: usize) {
     let _ = vm.get_stack().pop();
     let va_arg_vec = vm.get_call_frame().va_args.clone();
     let mut b_array = Box::new(Array{marked: false, array: va_arg_vec});
@@ -184,7 +183,7 @@ pub fn sloth_va_arg(vm: &mut Vm, arg_num: usize, _protected: bool) {
 }
 
 
-pub fn sloth_ord(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_ord(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let s = if let ValueKind::String(s) = vm.get_stack().pop().unwrap().kind() {
         s
@@ -200,7 +199,7 @@ pub fn sloth_ord(vm: &mut Vm, arg_num: usize, _protected: bool) {
     vm.get_stack().push(Value::Number(val as usize as f64));
 }
 
-pub fn sloth_chr(vm: &mut Vm, arg_num: usize, _protected: bool) {
+pub fn sloth_chr(vm: &mut Vm, arg_num: usize) {
     arity_assert!(1, arg_num);
     let v = if let ValueKind::Number(v) = vm.get_stack().pop().unwrap().kind() {
         v
@@ -251,15 +250,6 @@ fn write_val(buffer: &mut String, val: &Value, visited_loc: &mut HashSet<*mut u8
                 visited_loc.remove(&(d as *mut u8));
             }
         }
-        ValueKind::Error(d) => {
-            if visited_loc.get(&(d as *mut u8)).is_some() {
-                write!(buffer, "...")?;
-            } else {
-                visited_loc.insert(d as *mut u8);
-                write_dict(buffer, d, visited_loc)?;
-                visited_loc.remove(&(d as *mut u8));
-            }
-        }
         ValueKind::Closure(p) => {
             write!(buffer, "Closure@{p:?}")?;
         }
@@ -297,15 +287,6 @@ fn print_val(val: &Value, visited_loc: &mut HashSet<*mut u8>) {
             }
         }
         ValueKind::Dictionary(d) => {
-            if visited_loc.get(&(d as *mut u8)).is_some() {
-                print!("...");
-            } else {
-                visited_loc.insert(d as *mut u8);
-                print_dict(d, visited_loc);
-                visited_loc.remove(&(d as *mut u8));
-            }
-        }
-        ValueKind::Error(d) => {
             if visited_loc.get(&(d as *mut u8)).is_some() {
                 print!("...");
             } else {
